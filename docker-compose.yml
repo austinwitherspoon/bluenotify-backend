@@ -1,0 +1,36 @@
+version: '3.8'
+
+services:
+  notifier:
+    build:
+      context: .
+      dockerfile: notifier.Dockerfile
+    volumes:
+      - ./apps/notifier/src:/app/apps/notifier/src
+      - ./packages:/app/packages
+      - ./cert.json:/app/cert.json
+    ports:
+      - "8000:8000"
+    environment:
+      - GOOGLE_APPLICATION_CREDENTIALS=/app/cert.json
+      - GOOGLE_CLOUD_PROJECT=${GOOGLE_CLOUD_PROJECT}
+      - MOCK=True
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/"]
+      interval: 5s
+      timeout: 5s
+      retries: 3
+
+  jetstream_reader:
+    build:
+      context: .
+      dockerfile: jetstream_reader.Dockerfile
+    volumes:
+      - ./apps/jetstream-reader/src:/app/apps/jetstream-reader/src
+      - ./packages:/app/packages
+    environment:
+      - NOTIFIER_SERVER=http://notifier:8000
+      - MOCK=True
+    depends_on:
+      notifier:
+        condition: service_healthy

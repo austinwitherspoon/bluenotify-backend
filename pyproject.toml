@@ -1,0 +1,44 @@
+[project]
+name = "bluenotify-backend"
+version = "0.1.0"
+requires-python = ">=3.13"
+dependencies = [
+]
+
+[tool.uv.workspace]
+members = ["packages/*", "apps/*"]
+
+[tool.uv.sources]
+notifier = { workspace = true }
+jetstream-reader = { workspace = true }
+custom-types = { workspace = true }
+async-utils = { workspace = true }
+
+[dependency-groups]
+dev = [
+    "mypy>=1.13.0",
+    "pre-commit>=4.0.1",
+    "ruff>=0.8.1",
+]
+
+[tool.ruff]
+include = ["pyproject.toml", "apps/**/*.py", "packages/**/*.py"]
+line-length = 120
+target-version = "py313"
+
+[tool.ruff.lint]
+select = [
+    "F",
+    "W",
+    "E",
+    "I",
+    "C",
+    "N",
+    "ANN",
+    "ASYNC",
+]
+fixable = ["ALL"]
+ignore = [
+    "ANN201",
+    "ANN401", # missing type annotation
+]
