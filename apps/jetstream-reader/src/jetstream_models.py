@@ -38,5 +38,31 @@ class Post(BlueskyBaseModel):
     def post_datetime(self) -> datetime.datetime | None:
         if not self.commit or not self.commit.record:
             return None
-        # format 2024-12-06T01:47:20.666416+00:00
-        return datetime.datetime.strptime(self.commit.record.createdAt, "%Y-%m-%dT%H:%M:%S.%f%z")
+        return parse_created_at(self.commit.record.createdAt)
+
+
+def parse_created_at(time: str) -> datetime.datetime:
+    """Parse the created_at time from the Bluesky API."""
+    # formats:
+    # 2024-12-07T05:48:21.260Z
+    # 2024-12-07T05:43:53.0557218Z
+    # 2024-12-07T05:48:07+00:00
+    if "+" in time:
+        return datetime.datetime.strptime(time, "%Y-%m-%dT%H:%M:%S%z")
+    try:
+        return datetime.datetime.strptime(time, "%Y-%m-%dT%H:%M:%S.%f%z")
+    except ValueError:
+        year, month, day = time.split("T")[0].split("-")
+        hour, minute, second = time.split("T")[1].split("+")[0].split(":")
+        second, microsecond = second.split(".")
+        microsecond = "".join([c for c in microsecond if c.isdigit()])
+        return datetime.datetime(
+            int(year),
+            int(month),
+            int(day),
+            int(hour),
+            int(minute),
+            int(second),
+            int(microsecond),
+            tzinfo=datetime.timezone.utc,
+        )
