@@ -51,3 +51,27 @@ def cache(
         return wrapper
 
     return decorator
+
+
+def retry(
+    retries: int = 3,
+    delay: float = 5,
+) -> Callable[[Callable[Param, Coroutine[None, None, RetType]]], Callable[Param, Coroutine[None, None, RetType]]]:
+    """Retry a coroutine if it fails."""
+
+    def decorator(
+        func: Callable[Param, Coroutine[None, None, RetType]],
+    ) -> Callable[Param, Coroutine[None, None, RetType]]:
+        async def wrapper(*args: Param.args, **kwargs: Param.kwargs) -> RetType:
+            i = 0
+            while True:
+                try:
+                    return await func(*args, **kwargs)
+                except Exception as e:
+                    if i == retries - 1:
+                        raise e
+                    await asyncio.sleep(delay)
+
+        return wrapper
+
+    return decorator

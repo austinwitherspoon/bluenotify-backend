@@ -9,7 +9,7 @@ import random
 from urllib.parse import urlparse
 
 import httpx
-from async_utils import schedule_task
+from async_utils import retry, schedule_task
 from custom_types import BlueskyDid
 from websockets.asyncio.client import connect
 
@@ -62,7 +62,7 @@ async def stream_users_to_watch():
             logger.exception(e)
             await asyncio.sleep(1)
 
-
+@retry(12, 5)
 async def forward_post(post: Post):
     """Forward the post to our notification server."""
     if not post.commit:
