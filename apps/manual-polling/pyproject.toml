@@ -1,5 +1,5 @@
 [project]
-name = "jetstream-reader"
+name = "manual-polling"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
@@ -12,6 +12,7 @@ dependencies = [
     "httpx>=0.27.0",
     "sentry-sdk>=2.19.2",
     "prometheus-client>=0.21.1",
+    "atproto>=0.0.56",
 ]
 
 [tool.uv]

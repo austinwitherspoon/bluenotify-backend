@@ -1,6 +1,7 @@
 """Server that sends notifications to users."""
 
 import asyncio
+import contextlib
 import datetime
 import logging
 from contextlib import asynccontextmanager
@@ -9,7 +10,7 @@ import fastapi
 import prometheus_client
 from async_utils import schedule_task
 from custom_types import BlueskyDid, BlueskyRKey, BlueskyUri, bluesky_uri
-from fastapi import FastAPI, WebSocket
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
 from . import firestore
 from .bluesky import get_post
@@ -53,20 +54,21 @@ async def get_users():
 @app.websocket("/users_to_watch")
 async def stream_users(websocket: WebSocket):
     """Stream events for when users to watch are added or removed."""
-    await websocket.accept()
-    last_users_set = USER_SETTINGS.users_to_watch.copy()
+    with contextlib.suppress(WebSocketDisconnect):
+        await websocket.accept()
+        last_users_set = USER_SETTINGS.users_to_watch.copy()
 
-    for user in last_users_set:
-        await websocket.send_json({"action": "add", "user": user})
-    while True:
-        await USER_SETTINGS.changed.wait()
-
-        new_set = USER_SETTINGS.users_to_watch.copy()
-        for user in new_set - last_users_set:
+        for user in last_users_set:
             await websocket.send_json({"action": "add", "user": user})
-        for user in last_users_set - new_set:
-            await websocket.send_json({"action": "remove", "user": user})
-        last_users_set = new_set
+        while True:
+            await USER_SETTINGS.changed.wait()
+
+            new_set = USER_SETTINGS.users_to_watch.copy()
+            for user in new_set - last_users_set:
+                await websocket.send_json({"action": "add", "user": user})
+            for user in last_users_set - new_set:
+                await websocket.send_json({"action": "remove", "user": user})
+            last_users_set = new_set
 
 
 @app.post("/post/{did}/{rkey}")
@@ -74,6 +76,7 @@ async def post(did: BlueskyDid, rkey: BlueskyRKey):
     """Post a message to a user."""
     uri = bluesky_uri(did, rkey)
     if uri in PROCESSED_POSTS:
+        logger.info(f"ignoring processed post: {uri}")
         return
 
     RECEIVED_MESSAGES.inc()
@@ -90,6 +93,7 @@ async def repost(did: BlueskyDid, rkey: BlueskyRKey):
     """Post a message to a user."""
     uri = bluesky_uri(did, rkey)
     if uri in PROCESSED_POSTS:
+        logger.info(f"ignoring processed post: {uri}")
         return
 
     RECEIVED_MESSAGES.inc()

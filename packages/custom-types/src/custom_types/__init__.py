@@ -1,6 +1,8 @@
 from enum import Enum
 from typing import NewType
 
+from websockets import ConnectionClosedError
+
 FirebaseToken = NewType("FirebaseToken", str)
 BlueskyDid = NewType("BlueskyDid", str)
 BlueskyCid = NewType("BlueskyCid", str)
@@ -31,3 +33,6 @@ class PostType(Enum):
     REPOST = "repost"
     QUOTE_POST = "quote_post"
     REPLY = "reply"
+
+
+DISCONNECT_ERRORS = (TimeoutError, ConnectionClosedError, ConnectionRefusedError, EOFError)

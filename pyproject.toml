@@ -11,8 +11,10 @@ members = ["packages/*", "apps/*"]
 [tool.uv.sources]
 notifier = { workspace = true }
 jetstream-reader = { workspace = true }
+manual-polling = { workspace = true }
 custom-types = { workspace = true }
 async-utils = { workspace = true }
+bluesky-utils = { workspace = true }
 
 [dependency-groups]
 dev = [

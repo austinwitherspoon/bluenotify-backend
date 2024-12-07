@@ -9,8 +9,10 @@ resolution-markers = [
 members = [
     "async-utils",
     "bluenotify-backend",
+    "bluesky-utils",
     "custom-types",
     "jetstream-reader",
+    "manual-polling",
     "notifier",
 ]
 
@@ -82,6 +84,11 @@ dev = [
     { name = "pytest", specifier = ">=8.3.4" },
     { name = "ruff", specifier = ">=0.8.1" },
 ]
+
+[[package]]
+name = "bluesky-utils"
+version = "0.1.0"
+source = { editable = "packages/bluesky-utils" }
 
 [[package]]
 name = "cachecontrol"
@@ -647,6 +654,31 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/34/10/c65f7a4ca38e4d1fd5537e689901c6cae6f1eeb49c0f8ecabbf991c48135/libipld-3.0.0-cp313-none-win32.whl", hash = "sha256:fed7d4f10a5ba37f069453e834429cdf4fb04d789cfc38a696ca069f9e401f5f", size = 176269 },
     { url = "https://files.pythonhosted.org/packages/ad/a3/199772db97f0ba8e7e7c8356bccd683537ce4fa628891f3e77648bbd92c5/libipld-3.0.0-cp313-none-win_amd64.whl", hash = "sha256:48fbff37e6f3378e45117de45f42332273bff29b227744ef6268c3406dd70bac", size = 193657 },
     { url = "https://files.pythonhosted.org/packages/60/0d/30235424a2ddbe8bf47060a422792b38d6e5479133d125a4e0cd76541911/libipld-3.0.0-cp313-none-win_arm64.whl", hash = "sha256:79d5d38dcc93de6157ced37d47fec0a8ce03edd53de52623c7d315063306eba3", size = 170574 },
+]
+
+[[package]]
+name = "manual-polling"
+version = "0.1.0"
+source = { virtual = "apps/manual-polling" }
+dependencies = [
+    { name = "async-utils" },
+    { name = "atproto" },
+    { name = "custom-types" },
+    { name = "httpx" },
+    { name = "prometheus-client" },
+    { name = "sentry-sdk" },
+    { name = "websockets" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "async-utils", editable = "packages/async-utils" },
+    { name = "atproto", specifier = ">=0.0.56" },
+    { name = "custom-types", editable = "packages/custom-types" },
+    { name = "httpx", specifier = ">=0.27.0" },
+    { name = "prometheus-client", specifier = ">=0.21.1" },
+    { name = "sentry-sdk", specifier = ">=2.19.2" },
+    { name = "websockets", specifier = ">=13.0" },
 ]
 
 [[package]]

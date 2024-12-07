@@ -10,7 +10,7 @@ from urllib.parse import urlparse
 
 import httpx
 from async_utils import retry, schedule_task
-from custom_types import BlueskyDid
+from custom_types import DISCONNECT_ERRORS, BlueskyDid
 from websockets.asyncio.client import connect
 
 from .jetstream_models import Post
@@ -41,6 +41,7 @@ SERVER_ONLINE_TIMEOUT = 60 * 10
 client = httpx.AsyncClient(timeout=httpx.Timeout(60.0))
 
 
+
 async def stream_users_to_watch():
     """Stream changes to the users we're interested in posts from from the notifier server."""
     server_data = urlparse(NOTIFIER_SERVER)
@@ -64,8 +65,8 @@ async def stream_users_to_watch():
                             logger.info(f"Removing user from listen list: {user_did}")
                         case _:
                             logger.error(f"Unknown message from notifier server: {message}")
-        except TimeoutError:
-            logger.warning("user watch TimeoutError, retrying...")
+        except DISCONNECT_ERRORS:
+            logger.warning("User watch disconnect, retrying...")
             await asyncio.sleep(1)
         except Exception as e:
             logger.exception(e)
@@ -146,8 +147,8 @@ async def main() -> None:
                             continue
 
                         schedule_task(forward_post(model))  # type: ignore
-        except TimeoutError:
-            logger.warning("TimeoutError, retrying...")
+        except DISCONNECT_ERRORS:
+            logger.warning("disconnected from jetstream, reconnecting...")
             await asyncio.sleep(1)
         except Exception as e:
             logger.exception(e)
