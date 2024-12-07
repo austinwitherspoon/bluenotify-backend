@@ -15,6 +15,7 @@ services:
       - GOOGLE_APPLICATION_CREDENTIALS=/app/cert.json
       - GOOGLE_CLOUD_PROJECT=${GOOGLE_CLOUD_PROJECT}
       - MOCK=True
+      - SETTINGS_COLLECTION=${SETTINGS_COLLECTION}
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/"]
       interval: 5s
@@ -30,7 +31,6 @@ services:
       - ./packages:/app/packages
     environment:
       - NOTIFIER_SERVER=http://notifier:8000
-      - MOCK=True
     depends_on:
       notifier:
         condition: service_healthy

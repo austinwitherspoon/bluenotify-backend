@@ -124,6 +124,7 @@ class AllFollowSettings(MutableMapping):
     def listen_to_changes(self) -> None:
         """Start a listener to the firestore collection in another thread."""
         self.client = firestore.client()
+        logger.info(f"Listening to changes in {SETTINGS_COLLECTION}")
         self.collection = self.client.collection(SETTINGS_COLLECTION)
         self.collection.on_snapshot(self._update_follow_settings)
 

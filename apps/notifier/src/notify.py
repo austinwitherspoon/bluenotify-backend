@@ -4,8 +4,11 @@ import logging
 import os
 import traceback
 
+from atproto_client.models.app.bsky.embed.external import Main as EmbedExternal  # type: ignore
+from atproto_client.models.app.bsky.embed.images import Main as EmbedImage  # type: ignore
 from atproto_client.models.app.bsky.embed.record import Main as EmbedRecord  # type: ignore
 from atproto_client.models.app.bsky.embed.record_with_media import Main as EmbedRecordWithMedia  # type: ignore
+from atproto_client.models.app.bsky.embed.video import Main as EmbedVideo  # type: ignore
 from custom_types import FirebaseToken, PostType, bluesky_browseable_url, parse_uri
 from firebase_admin import messaging  # type: ignore
 
@@ -28,7 +31,8 @@ MOCK = os.getenv("MOCK", "false").lower().strip() == "true"
 
 async def process_post(post: PostResponse | RepostResponse, settings: AllFollowSettings) -> None:  # noqa: C901
     """Process a post."""
-    logger.info(f"Processing post: {post.uri}")
+    post_logger = logger.getChild(post.uri)
+    post_logger.info(f"Processing post: {post.uri}")
 
     did, rkey = parse_uri(post.uri)  # type: ignore
 
@@ -72,11 +76,14 @@ async def process_post(post: PostResponse | RepostResponse, settings: AllFollowS
                 continue
 
     if not users_to_notify:
-        logger.info("No users to notify")
+        post_logger.info("No users to notify")
         return
+
+    post_logger.info(f"Users to notify: {users_to_notify}")
 
     poster = await get_user(did)
     poster_name = poster.display_name or poster.handle
+
     match post_type:
         case PostType.POST:
             title = f"{poster_name} posted:"
@@ -91,9 +98,36 @@ async def process_post(post: PostResponse | RepostResponse, settings: AllFollowS
         case PostType.QUOTE_POST:
             title = f"{poster_name} quote posted:"
 
+    source_poster = poster
+
     text = source_post.value.text or None
 
-    url = bluesky_browseable_url(poster.handle, rkey)
+    media_type = None
+
+    # if the user is quoting a post, media is stored in a weird nested way
+    embed = None
+    if source_post.value.embed and isinstance(source_post.value.embed, EmbedRecordWithMedia):
+        embed = source_post.value.embed.media
+    elif source_post.value.embed:
+        embed = source_post.value.embed
+
+    if embed and isinstance(embed, EmbedImage):
+        media_type = "image"
+    elif embed and isinstance(embed, EmbedVideo):
+        media_type = "video"
+    elif embed and isinstance(embed, EmbedExternal):
+        media_type = "external link"
+
+    if text is None and media_type:
+        text = f"[{media_type}]"
+
+    source_post_did, source_post_rkey = parse_uri(source_post.uri)  # type: ignore
+    source_poster_handle = source_poster.handle
+    if post_type == PostType.REPOST:
+        source_poster = await get_user(source_post_did)
+        source_poster_handle = source_poster.handle
+
+    url = bluesky_browseable_url(source_poster_handle, source_post_rkey)
 
     data = {
         "url": url,
@@ -104,14 +138,21 @@ async def process_post(post: PostResponse | RepostResponse, settings: AllFollowS
         "post_id": rkey,
     }
 
-    logger.info(f"Sending message to {len(users_to_notify)} users.")
+    post_logger.info(f"Sending message to {len(users_to_notify)} users.")
+    post_logger.info(f"Title: {title}")
+    post_logger.info(f"Text: {text}")
+    post_logger.info(f"Url: {url}")
     await send_message(
         users_to_notify,
         title,
         text or "",
         data,
+        all_settings=settings,
         mock=MOCK,
     )
+
+    # remove the logger so we don't keep it forever
+    logging.getLogger().manager.loggerDict.pop(post_logger.name, None)
 
 
 async def send_message(
@@ -119,6 +160,7 @@ async def send_message(
     title: str,
     body: str,
     data: dict[str, str],
+    all_settings: AllFollowSettings,
     mock: bool = False,
 ):
     """Send a notification to a user."""
@@ -130,6 +172,7 @@ async def send_message(
         title,
         body,
         data,
+        all_settings,
         mock,
     )
 
@@ -139,6 +182,7 @@ def _send_message_sync(
     title: str,
     body: str,
     data: dict[str, str],
+    all_settings: AllFollowSettings,
     mock: bool = False,
 ) -> None:
     try:
@@ -169,6 +213,9 @@ def _send_message_sync(
                     logger.info(f"Send to {message.token} result: {result}")
                 else:
                     logger.info(f"Mock send to {message.token}")
+            except messaging.UnregisteredError:
+                logger.info(f"Unregistered token: {message.token}, removing")
+                all_settings.remove_setting_from_firestore(message.token)  # type: ignore
             except Exception as e:
                 logger.warning(f"Error sending {e}")
     except Exception as e:
