@@ -12,7 +12,7 @@ services:
       - SETTINGS_COLLECTION=${SETTINGS_COLLECTION}
       - SENTRY_DSN=${SENTRY_DSN}
     volumes:
-      - ./cert.json:/app/cert.json
+      - ../cert.json:/app/cert.json
     ports:
       - "8000:8000"
     restart: always
