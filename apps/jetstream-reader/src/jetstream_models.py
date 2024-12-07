@@ -43,10 +43,12 @@ class Post(BlueskyBaseModel):
 
 def parse_created_at(time: str) -> datetime.datetime:
     """Parse the created_at time from the Bluesky API."""
+    # WHY ARE THESE SO INCONSISTENT?!
     # formats:
     # 2024-12-07T05:48:21.260Z
     # 2024-12-07T05:43:53.0557218Z
     # 2024-12-07T05:48:07+00:00
+    time = time.replace("+00:00", "Z")
     if "+" in time:
         return datetime.datetime.strptime(time, "%Y-%m-%dT%H:%M:%S%z")
     try:
@@ -54,7 +56,11 @@ def parse_created_at(time: str) -> datetime.datetime:
     except ValueError:
         year, month, day = time.split("T")[0].split("-")
         hour, minute, second = time.split("T")[1].split("+")[0].split(":")
-        second, microsecond = second.split(".")
+        if "." in second:
+            second, microsecond = second.split(".")
+        else:
+            microsecond = "0"
+        second = "".join([c for c in second if c.isdigit()])
         microsecond = "".join([c for c in microsecond if c.isdigit()])
         return datetime.datetime(
             int(year),
