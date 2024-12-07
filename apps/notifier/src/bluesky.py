@@ -2,6 +2,7 @@
 
 import datetime
 
+import httpx
 from async_utils import cache, retry
 from atproto import AsyncClient  # type: ignore
 from atproto_client.models.app.bsky.actor.defs import ProfileViewDetailed  # type: ignore
@@ -10,6 +11,10 @@ from atproto_client.models.app.bsky.feed.repost import GetRecordResponse as Repo
 from custom_types import BlueskyDid, BlueskyRKey
 
 client = AsyncClient(base_url="https://public.api.bsky.app/")
+
+# override the default 5 second timeout in atproto's httpx client
+bluesky_httpx = client.request._client
+bluesky_httpx._timeout = httpx.Timeout(30.0)
 
 
 ProfileCache: dict[BlueskyDid, tuple[datetime.datetime,]] = {}

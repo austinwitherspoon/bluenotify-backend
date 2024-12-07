@@ -16,6 +16,7 @@ services:
       - GOOGLE_CLOUD_PROJECT=${GOOGLE_CLOUD_PROJECT}
       - MOCK=True
       - SETTINGS_COLLECTION=${SETTINGS_COLLECTION}
+      - SENTRY_DSN=${SENTRY_DSN}
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/"]
       interval: 5s
@@ -31,6 +32,7 @@ services:
       - ./packages:/app/packages
     environment:
       - NOTIFIER_SERVER=http://notifier:8000
+      - SENTRY_DSN=${SENTRY_DSN}
     depends_on:
       notifier:
         condition: service_healthy

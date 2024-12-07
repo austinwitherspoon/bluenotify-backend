@@ -34,6 +34,11 @@ JETSTREAM_SERVERS = {
     "jetstream2.us-east.bsky.network",
 }
 
+# How long to wait for the server to come online before giving up
+SERVER_ONLINE_TIMEOUT = 60 * 10
+
+client = httpx.AsyncClient(timeout=httpx.Timeout(60.0))
+
 
 async def stream_users_to_watch():
     """Stream changes to the users we're interested in posts from from the notifier server."""
@@ -58,6 +63,9 @@ async def stream_users_to_watch():
                             logger.info(f"Removing user from listen list: {user_did}")
                         case _:
                             logger.error(f"Unknown message from notifier server: {message}")
+        except TimeoutError:
+            logger.warning("user watch TimeoutError, retrying...")
+            await asyncio.sleep(1)
         except Exception as e:
             logger.exception(e)
             await asyncio.sleep(1)
@@ -67,13 +75,21 @@ async def forward_post(post: Post):
     """Forward the post to our notification server."""
     if not post.commit:
         return
-    async with httpx.AsyncClient() as client:
-        if post.commit.collection == "app.bsky.feed.post":
-            await client.post(f"{NOTIFIER_SERVER}/post/{post.did}/{post.commit.rkey}")
-        elif post.commit.collection == "app.bsky.feed.repost":
-            await client.post(f"{NOTIFIER_SERVER}/repost/{post.did}/{post.commit.rkey}")
-        else:
-            logger.error(f"Unknown post collection: {post.commit.collection}")
+
+    for _ in range(SERVER_ONLINE_TIMEOUT):
+        try:
+            await client.get(NOTIFIER_SERVER)
+            break
+        except Exception as e:
+            logger.warning(f"Server not online: {e}")
+            await asyncio.sleep(1)
+
+    if post.commit.collection == "app.bsky.feed.post":
+        await client.post(f"{NOTIFIER_SERVER}/post/{post.did}/{post.commit.rkey}")
+    elif post.commit.collection == "app.bsky.feed.repost":
+        await client.post(f"{NOTIFIER_SERVER}/repost/{post.did}/{post.commit.rkey}")
+    else:
+        logger.error(f"Unknown post collection: {post.commit.collection}")
 
 
 async def main() -> None:
@@ -123,7 +139,9 @@ async def main() -> None:
                             continue
 
                         schedule_task(forward_post(model))  # type: ignore
-
+        except TimeoutError:
+            logger.warning("TimeoutError, retrying...")
+            await asyncio.sleep(1)
         except Exception as e:
             logger.exception(e)
             await asyncio.sleep(1)
