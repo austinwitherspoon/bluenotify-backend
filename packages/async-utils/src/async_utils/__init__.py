@@ -3,6 +3,8 @@ import datetime
 import typing
 from typing import Any, Callable, Coroutine, ParamSpec, TypeVar
 
+from prometheus_client import Summary
+
 Param = ParamSpec("Param")
 RetType = TypeVar("RetType")
 # Asyncio tasks that we don't want to be garbage collected
@@ -71,6 +73,21 @@ def retry(
                     if i == retries - 1:
                         raise e
                     await asyncio.sleep(delay)
+
+        return wrapper
+
+    return decorator
+
+
+def prometheus_time(summary: Summary):
+    """Time an async function with prometheus."""
+
+    def decorator(
+        func: Callable[Param, Coroutine[None, None, RetType]],
+    ) -> Callable[Param, Coroutine[None, None, RetType]]:
+        async def wrapper(*args: Param.args, **kwargs: Param.kwargs) -> RetType:
+            with summary.time():
+                return await func(*args, **kwargs)
 
         return wrapper
 

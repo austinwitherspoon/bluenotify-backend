@@ -4,6 +4,7 @@ import logging
 import os
 import traceback
 
+from async_utils import prometheus_time
 from atproto_client.models.app.bsky.embed.external import Main as EmbedExternal  # type: ignore
 from atproto_client.models.app.bsky.embed.images import Main as EmbedImage  # type: ignore
 from atproto_client.models.app.bsky.embed.record import Main as EmbedRecord  # type: ignore
@@ -14,6 +15,7 @@ from firebase_admin import messaging  # type: ignore
 
 from .bluesky import PostResponse, RepostResponse, get_following, get_post, get_user
 from .firestore import AllFollowSettings, FirestorePostType
+from .prometheus import NOTIFICATIONS_SENT, POST_HANDLE_TIME, track_backlog
 
 logger = logging.getLogger(__name__)
 thread_pool = concurrent.futures.ThreadPoolExecutor(max_workers=4)
@@ -28,7 +30,8 @@ FIRESTORE_POST_TYPE_MAP = {
 
 MOCK = os.getenv("MOCK", "false").lower().strip() == "true"
 
-
+@track_backlog
+@prometheus_time(POST_HANDLE_TIME)
 async def process_post(post: PostResponse | RepostResponse, settings: AllFollowSettings) -> None:  # noqa: C901
     """Process a post."""
     post_logger = logger.getChild(post.uri)
@@ -213,6 +216,7 @@ def _send_message_sync(
                     logger.info(f"Send to {message.token} result: {result}")
                 else:
                     logger.info(f"Mock send to {message.token}")
+                NOTIFICATIONS_SENT.inc()
             except messaging.UnregisteredError:
                 logger.info(f"Unregistered token: {message.token}, removing")
                 all_settings.remove_setting_from_firestore(message.token)  # type: ignore

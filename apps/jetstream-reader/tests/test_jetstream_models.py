@@ -21,6 +21,7 @@ from src.jetstream_models import parse_created_at  # type: ignore
             "2024-12-07T18:57:06.701504+00:00",
             datetime.datetime(2024, 12, 7, 18, 57, 6, 701504, tzinfo=datetime.timezone.utc),
         ),
+        ("2024-12-07T19:06:18Z", datetime.datetime(2024, 12, 7, 19, 6, 18, tzinfo=datetime.timezone.utc)),
     ],
 )
 def test_parse_created_at(time: str, expected: datetime.datetime):

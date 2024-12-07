@@ -11,7 +11,9 @@ from typing import Any, Iterator, TypeVar, overload
 from custom_types import BlueskyDid, FirebaseToken
 from firebase_admin import firestore  # type: ignore
 from google.cloud.firestore_v1.base_document import DocumentSnapshot  # type: ignore
-from google.cloud.firestore_v1.watch import DocumentChange  # type: ignore
+from google.cloud.firestore_v1.watch import DocumentChange
+
+from .prometheus import SUBSCRIBED_USERS, WATCHED_USERS
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +84,9 @@ class AllFollowSettings(MutableMapping):
         if has_changed:
             self.changed.set()
             self.changed.clear()
+
+        SUBSCRIBED_USERS.set(len(self._settings))
+        WATCHED_USERS.set(len(self._users_to_subscribers))
 
     @overload
     def get(self, key: FirebaseToken) -> UserFollowSettings: ...

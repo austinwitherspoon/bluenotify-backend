@@ -33,6 +33,8 @@ services:
     environment:
       - NOTIFIER_SERVER=http://notifier:8000
       - SENTRY_DSN=${SENTRY_DSN}
+    ports:
+      - "9000:9000"
     depends_on:
       notifier:
         condition: service_healthy

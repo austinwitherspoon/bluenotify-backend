@@ -14,6 +14,7 @@ from custom_types import BlueskyDid
 from websockets.asyncio.client import connect
 
 from .jetstream_models import Post
+from .prometheus import ALL_MESSAGES, FORWARD_POST_TIME, HANDLED_MESSAGES, JETSTREAM_LAG
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +71,7 @@ async def stream_users_to_watch():
             logger.exception(e)
             await asyncio.sleep(1)
 
+
 @retry(12, 5)
 async def forward_post(post: Post):
     """Forward the post to our notification server."""
@@ -84,12 +86,15 @@ async def forward_post(post: Post):
             logger.warning(f"Server not online: {e}")
             await asyncio.sleep(1)
 
-    if post.commit.collection == "app.bsky.feed.post":
-        await client.post(f"{NOTIFIER_SERVER}/post/{post.did}/{post.commit.rkey}")
-    elif post.commit.collection == "app.bsky.feed.repost":
-        await client.post(f"{NOTIFIER_SERVER}/repost/{post.did}/{post.commit.rkey}")
-    else:
-        logger.error(f"Unknown post collection: {post.commit.collection}")
+    with FORWARD_POST_TIME.time():
+        if post.commit.collection == "app.bsky.feed.post":
+            await client.post(f"{NOTIFIER_SERVER}/post/{post.did}/{post.commit.rkey}")
+        elif post.commit.collection == "app.bsky.feed.repost":
+            await client.post(f"{NOTIFIER_SERVER}/repost/{post.did}/{post.commit.rkey}")
+        else:
+            logger.error(f"Unknown post collection: {post.commit.collection}")
+
+    HANDLED_MESSAGES.inc()
 
 
 async def main() -> None:
@@ -113,6 +118,7 @@ async def main() -> None:
         try:
             async with connect(websocket_url) as websocket:
                 while message := await websocket.recv():  # type: ignore
+                    ALL_MESSAGES.inc()
                     assert isinstance(message, str)
 
                     # extract out the user DID from the message
@@ -129,6 +135,7 @@ async def main() -> None:
                         now = datetime.datetime.now(tz=datetime.UTC)
                         lag = now - time
                         logger.debug(f"{lag.total_seconds()} seconds lag.")
+                        JETSTREAM_LAG.set(lag.total_seconds())
 
                         if not model.post_datetime:
                             continue

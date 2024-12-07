@@ -5,6 +5,8 @@ import datetime
 import logging
 from contextlib import asynccontextmanager
 
+import fastapi
+import prometheus_client
 from async_utils import schedule_task
 from custom_types import BlueskyDid, BlueskyRKey, BlueskyUri, bluesky_uri
 from fastapi import FastAPI, WebSocket
@@ -12,6 +14,7 @@ from fastapi import FastAPI, WebSocket
 from . import firestore
 from .bluesky import get_post
 from .notify import process_post
+from .prometheus import PROCESSED_POST_SIZE, RECEIVED_MESSAGES
 
 logger = logging.getLogger(__name__)
 
@@ -73,6 +76,8 @@ async def post(did: BlueskyDid, rkey: BlueskyRKey):
     if uri in PROCESSED_POSTS:
         return
 
+    RECEIVED_MESSAGES.inc()
+
     PROCESSED_POSTS[uri] = datetime.datetime.now(datetime.UTC)
 
     post = await get_post(did, rkey)
@@ -87,11 +92,19 @@ async def repost(did: BlueskyDid, rkey: BlueskyRKey):
     if uri in PROCESSED_POSTS:
         return
 
+    RECEIVED_MESSAGES.inc()
+
     PROCESSED_POSTS[uri] = datetime.datetime.now(datetime.UTC)
 
     post = await get_post(did, rkey, repost=True)
 
     schedule_task(process_post(post, USER_SETTINGS))
+
+
+@app.get("/metrics")
+async def metrics():
+    """Get the metrics for the server."""
+    return fastapi.responses.PlainTextResponse(prometheus_client.generate_latest())
 
 
 async def clean_processed_posts():
@@ -102,3 +115,5 @@ async def clean_processed_posts():
         for uri, time in list(PROCESSED_POSTS.items()):
             if now - time > MAX_NOTIFICATION_TIME:
                 PROCESSED_POSTS.pop(uri, None)
+
+        PROCESSED_POST_SIZE.set(len(PROCESSED_POSTS))
