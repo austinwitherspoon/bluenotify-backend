@@ -15,8 +15,10 @@ client = AsyncClient(base_url="https://public.api.bsky.app/")
 ProfileCache: dict[BlueskyDid, tuple[datetime.datetime,]] = {}
 
 
-async def get_post(did: BlueskyDid, rkey: BlueskyRKey) -> PostResponse | RepostResponse:
+async def get_post(did: BlueskyDid, rkey: BlueskyRKey, repost: bool = False) -> PostResponse | RepostResponse:
     """Get a post from Bluesky."""
+    if repost:
+        return await client.app.bsky.feed.repost.get(did, rkey)
     return await client.get_post(rkey, did)
 
 

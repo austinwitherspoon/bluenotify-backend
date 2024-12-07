@@ -68,7 +68,12 @@ async def forward_post(post: Post):
     if not post.commit:
         return
     async with httpx.AsyncClient() as client:
-        await client.post(f"{NOTIFIER_SERVER}/post/{post.did}/{post.commit.rkey}")
+        if post.commit.collection == "app.bsky.feed.post":
+            await client.post(f"{NOTIFIER_SERVER}/post/{post.did}/{post.commit.rkey}")
+        elif post.commit.collection == "app.bsky.feed.repost":
+            await client.post(f"{NOTIFIER_SERVER}/repost/{post.did}/{post.commit.rkey}")
+        else:
+            logger.error(f"Unknown post collection: {post.commit.collection}")
 
 
 async def main() -> None:
@@ -100,6 +105,8 @@ async def main() -> None:
                     if did in INTERESTING_USERS:
                         logger.info(message)
                         model = Post.model_validate_json(message)
+                        if not model.commit or not model.commit.record or model.commit.operation != "create":
+                            continue
                         last_update = model.time_us
 
                         time = datetime.datetime.fromtimestamp(float(model.time_us) / 1_000_000.0, tz=datetime.UTC)

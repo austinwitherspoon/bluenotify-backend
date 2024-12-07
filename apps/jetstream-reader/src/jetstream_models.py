@@ -22,7 +22,7 @@ class Commit(BlueskyBaseModel):
     collection: str
     rkey: str
     cid: BlueskyCid | None = None
-    record: Record
+    record: Record | None = None
 
 
 class Post(BlueskyBaseModel):

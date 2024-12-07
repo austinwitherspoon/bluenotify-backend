@@ -80,6 +80,20 @@ async def post(did: BlueskyDid, rkey: BlueskyRKey):
     schedule_task(process_post(post, USER_SETTINGS))
 
 
+@app.post("/repost/{did}/{rkey}")
+async def repost(did: BlueskyDid, rkey: BlueskyRKey):
+    """Post a message to a user."""
+    uri = bluesky_uri(did, rkey)
+    if uri in PROCESSED_POSTS:
+        return
+
+    PROCESSED_POSTS[uri] = datetime.datetime.now(datetime.UTC)
+
+    post = await get_post(did, rkey, repost=True)
+
+    schedule_task(process_post(post, USER_SETTINGS))
+
+
 async def clean_processed_posts():
     """Remove old posts from the processed posts."""
     while True:
