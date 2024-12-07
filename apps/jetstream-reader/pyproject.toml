@@ -9,6 +9,7 @@ dependencies = [
     "async-utils",
     "websockets>=13.0",
     "httpx>=0.27.0",
+    "sentry-sdk>=2.19.2",
 ]
 
 [tool.uv]

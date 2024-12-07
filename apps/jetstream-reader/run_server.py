@@ -1,6 +1,7 @@
 import asyncio
 import logging
 
+from src.sentry import init_sentry
 from src.server import main
 
 if __name__ == "__main__":
@@ -9,4 +10,7 @@ if __name__ == "__main__":
     handler = logging.StreamHandler()
     root_logger.addHandler(handler)
     handler.setFormatter(logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s"))
+
+    init_sentry()
+
     asyncio.run(main())
