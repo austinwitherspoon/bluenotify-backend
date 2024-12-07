@@ -150,3 +150,8 @@ class AllFollowSettings(MutableMapping):
             except Exception as e:
                 logger.info(data)
                 logger.warning(f"Error parsing settings: {e}")
+
+    def remove_setting_from_firestore(self, token: FirebaseToken) -> None:
+        """Remove the settings for a user from firestore."""
+        self.collection.document(token).delete()
+        self.pop(token, None)
