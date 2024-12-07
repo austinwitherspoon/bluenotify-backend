@@ -1,0 +1,13 @@
+version: '3.8'
+
+services:
+  manual_polling:
+    build:
+      context: ./../
+      dockerfile: manual_polling.Dockerfile
+    environment:
+      - NOTIFIER_SERVER=${NOTIFIER_SERVER}
+      - SENTRY_DSN=${SENTRY_DSN}
+    ports:
+      - "9000:9000"
+    restart: always
