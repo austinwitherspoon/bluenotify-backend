@@ -57,6 +57,8 @@ async def process_post(post: PostResponse | RepostResponse, settings: AllFollowS
 
     for user in users_to_notify.copy():
         user_settings = settings.get(user)
+        if user_settings is None:
+            continue
         settings_for_this_account = user_settings.settings.get(did)
         if settings_for_this_account is None:
             continue
