@@ -76,7 +76,9 @@ async def process_post(post: PostResponse | RepostResponse, settings: AllFollowS
             for user_did in user_settings.accounts:
                 following.update(await get_following(user_did))
 
-            if did not in following:
+            other_user_did, _ = parse_uri(post.value.reply.parent.uri)  # type: ignore
+
+            if other_user_did not in following:
                 users_to_notify.remove(user)
                 continue
 
