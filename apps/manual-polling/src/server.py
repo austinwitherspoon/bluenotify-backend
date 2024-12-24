@@ -134,6 +134,7 @@ async def cycle_through_all_watched_users():
 async def check_user_posts(user: BlueskyDid):  # noqa: C901
     """Check for recent posts for the given user and forward them."""
     logger.info(f"Checking for new posts for user: {user}")
+    check_time = datetime.datetime.now(tz=datetime.timezone.utc)
     last_post = LAST_POSTS.get(user)
     if not last_post:
         last_post = datetime.datetime.now(tz=datetime.timezone.utc)
@@ -163,19 +164,18 @@ async def check_user_posts(user: BlueskyDid):  # noqa: C901
                 continue
             created_at_time = parse_created_at(created_at)
 
-            if created_at_time < last_post:
+            if created_at_time <= last_post:
                 continue
             if datetime.datetime.now(tz=datetime.timezone.utc) - created_at_time > MAX_NOTIFICATION_TIME:
                 continue
             last_post = max(created_at_time, last_post)
             any_posts = True
-            logger.info(f"Forwarding post from {user}: {post.post.uri}")
             schedule_task(forward_post(post.post))
 
         if not any_posts:
             break
 
-        LAST_POSTS[user] = last_post
+        LAST_POSTS[user] = max(last_post, check_time)
 
 
 async def main() -> None:

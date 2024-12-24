@@ -232,10 +232,14 @@ version = "0.1.0"
 source = { editable = "packages/custom-types" }
 dependencies = [
     { name = "pydantic" },
+    { name = "websockets" },
 ]
 
 [package.metadata]
-requires-dist = [{ name = "pydantic", specifier = ">=2.10.2" }]
+requires-dist = [
+    { name = "pydantic", specifier = ">=2.10.2" },
+    { name = "websockets", specifier = ">=13.0" },
+]
 
 [[package]]
 name = "distlib"
@@ -606,6 +610,7 @@ version = "0.1.0"
 source = { virtual = "apps/jetstream-reader" }
 dependencies = [
     { name = "async-utils" },
+    { name = "bluesky-utils" },
     { name = "custom-types" },
     { name = "httpx" },
     { name = "prometheus-client" },
@@ -616,6 +621,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "async-utils", editable = "packages/async-utils" },
+    { name = "bluesky-utils", editable = "packages/bluesky-utils" },
     { name = "custom-types", editable = "packages/custom-types" },
     { name = "httpx", specifier = ">=0.27.0" },
     { name = "prometheus-client", specifier = ">=0.21.1" },
@@ -663,6 +669,7 @@ source = { virtual = "apps/manual-polling" }
 dependencies = [
     { name = "async-utils" },
     { name = "atproto" },
+    { name = "bluesky-utils" },
     { name = "custom-types" },
     { name = "httpx" },
     { name = "prometheus-client" },
@@ -674,6 +681,7 @@ dependencies = [
 requires-dist = [
     { name = "async-utils", editable = "packages/async-utils" },
     { name = "atproto", specifier = ">=0.0.56" },
+    { name = "bluesky-utils", editable = "packages/bluesky-utils" },
     { name = "custom-types", editable = "packages/custom-types" },
     { name = "httpx", specifier = ">=0.27.0" },
     { name = "prometheus-client", specifier = ">=0.21.1" },
