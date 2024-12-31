@@ -4,7 +4,9 @@ import asyncio
 import contextlib
 import datetime
 import logging
+import pickle
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 import fastapi
 import prometheus_client
@@ -27,13 +29,29 @@ USER_SETTINGS = firestore.AllFollowSettings()
 # All posts that have been processed, with timestamps, so we can avoid duplicates
 PROCESSED_POSTS: dict[BlueskyUri, datetime.datetime] = {}
 
+PROCESSED_POST_FILE = Path("processed_posts.pickle")
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Run the lifespan of the app."""
+    load_processed_posts()
     USER_SETTINGS.listen_to_changes()
     schedule_task(clean_processed_posts())
     yield
+    save_processed_posts()
+
+
+def load_processed_posts():
+    """Load the processed posts from disk."""
+    if PROCESSED_POST_FILE.exists():
+        data = pickle.load(PROCESSED_POST_FILE.open("rb"))
+        PROCESSED_POSTS.update(data)
+
+
+def save_processed_posts():
+    """Save the processed posts to disk."""
+    pickle.dump(PROCESSED_POSTS, PROCESSED_POST_FILE.open("wb"))
 
 
 app = FastAPI(lifespan=lifespan)
@@ -82,6 +100,7 @@ async def post(did: BlueskyDid, rkey: BlueskyRKey):
     RECEIVED_MESSAGES.inc()
 
     PROCESSED_POSTS[uri] = datetime.datetime.now(datetime.UTC)
+    save_processed_posts()
 
     post = await get_post(did, rkey)
 
@@ -99,6 +118,7 @@ async def repost(did: BlueskyDid, rkey: BlueskyRKey):
     RECEIVED_MESSAGES.inc()
 
     PROCESSED_POSTS[uri] = datetime.datetime.now(datetime.UTC)
+    save_processed_posts()
 
     post = await get_post(did, rkey, repost=True)
 

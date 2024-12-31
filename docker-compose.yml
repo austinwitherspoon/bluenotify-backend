@@ -9,6 +9,7 @@ services:
       - ./apps/notifier/src:/app/apps/notifier/src
       - ./packages:/app/packages
       - ./cert.json:/app/cert.json
+      - ./processed_posts.pickle:/app/processed_posts.pickle
     ports:
       - "8000:8000"
     environment:
