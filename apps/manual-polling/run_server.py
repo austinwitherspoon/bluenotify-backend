@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 
 from src.prometheus import start_prometheus_server
 from src.sentry import init_sentry
@@ -12,9 +13,10 @@ if __name__ == "__main__":
     root_logger.addHandler(handler)
     handler.setFormatter(logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s"))
 
+    port = int(os.environ.get("PORT", 9000))
     init_sentry()
 
-    start_prometheus_server(port=9000)
+    start_prometheus_server(port=port)
 
     try:
         asyncio.run(main())
