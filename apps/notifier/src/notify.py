@@ -51,7 +51,7 @@ async def process_post(post: PostResponse | RepostResponse, settings: AllFollowS
     elif isinstance(post.value.embed, (EmbedRecord, EmbedRecordWithMedia)):
         post_type = PostType.QUOTE_POST
 
-    users_to_notify = settings.users_to_subscribers.get(did, set())
+    users_to_notify = settings.users_to_subscribers.get(did, set()).copy()
 
     firestore_post_types = FIRESTORE_POST_TYPE_MAP[post_type]
 
@@ -67,7 +67,7 @@ async def process_post(post: PostResponse | RepostResponse, settings: AllFollowS
 
         # remove users who aren't interested in this type of post
         if not applicable_types:
-            users_to_notify.remove(user)
+            users_to_notify.discard(user)
             continue
 
         if applicable_types == {FirestorePostType.REPLY_TO_FRIEND}:
@@ -79,7 +79,7 @@ async def process_post(post: PostResponse | RepostResponse, settings: AllFollowS
             other_user_did, _ = parse_uri(post.value.reply.parent.uri)  # type: ignore
 
             if other_user_did not in following:
-                users_to_notify.remove(user)
+                users_to_notify.discard(user)
                 continue
 
     if not users_to_notify:
