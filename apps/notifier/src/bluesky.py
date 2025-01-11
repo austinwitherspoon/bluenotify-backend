@@ -38,8 +38,19 @@ async def get_user(did: BlueskyDid) -> ProfileViewDetailed:
 @cache(expire=datetime.timedelta(hours=1))
 async def get_following(did: BlueskyDid) -> set[BlueskyDid]:
     """Get the users that a user is following."""
-    follow_data = await client.get_follows(did)
-    return {follow.did for follow in follow_data.follows}  # type: ignore
+    cursor = None
+    results: set[BlueskyDid] = set()
+    while True:
+        results_length = len(results)
+        follow_data = await client.get_follows(did, cursor=cursor, limit=50)
+        if not follow_data.follows:
+            break
+        results.update({follow.did for follow in follow_data.follows})  # type: ignore
+        cursor = follow_data.cursor
+        if len(results) == results_length:
+            break
+
+    return results
 
 
 __all__ = ["get_post", "get_user", "get_following", "ProfileViewDetailed", "PostResponse", "RepostResponse"]
