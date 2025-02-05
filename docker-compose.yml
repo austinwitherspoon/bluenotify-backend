@@ -39,19 +39,4 @@ services:
     depends_on:
       notifier:
         condition: service_healthy
-
-  manual_polling:
-    build:
-      context: .
-      dockerfile: manual_polling.Dockerfile
-    volumes:
-      - ./apps/manual-polling/src:/app/apps/manual-polling/src
-      - ./packages:/app/packages
-    environment:
-      - NOTIFIER_SERVER=http://notifier:8000
-      - SENTRY_DSN=${SENTRY_DSN}
-    ports:
-      - "9000:9000"
-    depends_on:
-      notifier:
-        condition: service_healthy
+        

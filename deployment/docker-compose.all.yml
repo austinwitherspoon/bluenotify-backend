@@ -23,17 +23,6 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
-  manual_polling:
-    build:
-      context: ./../
-      dockerfile: manual_polling.Dockerfile
-    environment:
-      - NOTIFIER_SERVER=http://notifier:8000
-      - SENTRY_DSN=${SENTRY_DSN}
-    ports:
-      - "9000:9000"
-    restart: always
-    network_mode: "host"
   jetstream_reader:
     build:
       context: ./../
