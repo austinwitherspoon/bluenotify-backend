@@ -210,6 +210,17 @@ def _send_message_sync(
                     android=messaging.AndroidConfig(
                         priority="high",
                     ),
+                    apns=messaging.APNSConfig(
+                        payload=messaging.APNSPayload(
+                            aps=messaging.Aps(
+                                alert=messaging.ApsAlert(
+                                    title=title,
+                                    body=body,
+                                ),
+                                sound="default",
+                            ),
+                        ),
+                    ),
                 ),
             )
         logger.info(f"Sending {len(messages)} messages")
