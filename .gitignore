@@ -18,3 +18,5 @@ wheels/
 # secret files
 cert.json
 .env
+
+target/
