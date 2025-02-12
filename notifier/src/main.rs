@@ -8,7 +8,7 @@ use cached::proc_macro::cached;
 use futures::TryStreamExt;
 use lazy_static::lazy_static;
 use prometheus::{
-    self, register_gauge, register_int_counter, Encoder, Gauge, IntCounter, TextEncoder,
+    self, register_histogram, register_int_counter, Encoder, Gauge, Histogram, IntCounter, TextEncoder
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -24,19 +24,19 @@ use crate::fcm::FcmClient;
 
 const OLDEST_POST_AGE: chrono::Duration = chrono::Duration::hours(2);
 lazy_static! {
-    static ref ALL_MESSAGES_COUNTER: IntCounter = register_int_counter!(
-        "all_messages",
+    static ref RECEIVED_MESSAGES_COUNTER: IntCounter = register_int_counter!(
+        "received_messages",
         "The number of messages received by the server"
     )
     .unwrap();
-    static ref HANDLED_MESSAGES_COUNTER: IntCounter = register_int_counter!(
-        "handled_messages",
-        "The number of messages handled by the server"
+    static ref NOTIFICATIONS_SENT_COUNTER: IntCounter = register_int_counter!(
+        "notifications_sent",
+        "The number of notifications sent by the server"
     )
     .unwrap();
-    static ref JETSTREAM_LAG: Gauge = register_gauge!(
-        "jetstream_lag_seconds",
-        "The lag between the Jetstream events and the notifier server"
+    static ref POST_HANDLE_TIME: Histogram = register_histogram!(
+        "post_handle_time_seconds",
+        "Time spent handling a post"
     )
     .unwrap();
 }
@@ -502,6 +502,13 @@ async fn process_post(
         error!("Error acknowledging message: {:?}", ack);
         return;
     }
+    NOTIFICATIONS_SENT_COUNTER.inc();
+
+    let post_time = source_post.post_datetime();
+    if let Some(post_time) = post_time {
+        let handle_time = post_time - chrono::Utc::now();
+        POST_HANDLE_TIME.observe(handle_time.num_milliseconds() as f64 / 1000.0);
+    }
 
     send_notification(
         fcm_client,
@@ -596,6 +603,7 @@ async fn listen_to_posts(
                 continue;
             }
             info!("Received post: {:?}", post);
+            RECEIVED_MESSAGES_COUNTER.inc();
 
             let post = post.unwrap();
             let post_datetime = post.post_datetime().unwrap();
