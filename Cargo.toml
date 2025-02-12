@@ -6,5 +6,4 @@ members = [
     "firestore_reader",
     "user_settings",
     "bluesky_utils",
-    "exp",
 ]

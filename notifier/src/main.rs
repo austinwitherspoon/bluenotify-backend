@@ -524,7 +524,7 @@ async fn send_notification(
     info!("Title: {}", title);
     info!("Body: {}", body);
     info!("URL: {}", url);
-    let mock = std::env::var("MOCK").is_ok();
+    let mock = std::env::var("MOCK").unwrap_or("false".to_string()).to_ascii_lowercase() == "true";
     if mock {
         warn!("Mock mode, will not send notification!");
         return;
