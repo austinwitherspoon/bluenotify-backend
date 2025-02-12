@@ -682,8 +682,7 @@ async fn metrics() -> String {
     String::from_utf8(buffer).unwrap()
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+async fn _main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     tracing_subscriber::fmt::init();
 
     let mut nats_host = std::env::var("NATS_HOST").unwrap_or("localhost".to_string());
@@ -737,6 +736,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     tasks.join_all().await;
     Ok(())
+}
+
+fn main() {
+    let sentry_dsn = std::env::var("SENTRY_DSN");
+    if sentry_dsn.is_ok() {
+        let _guard = sentry::init((sentry_dsn.ok(), sentry::ClientOptions {
+            release: sentry::release_name!(),
+            ..Default::default()
+        }));
+    }
+    
+    _ = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(_main());
 }
 
 #[cfg(test)]
