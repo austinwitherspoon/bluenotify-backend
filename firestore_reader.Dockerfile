@@ -1,4 +1,4 @@
-FROM rust:1-slim-bookworm as builder
+FROM rust:1-bookworm as builder
 
 WORKDIR /app
 
@@ -22,7 +22,7 @@ RUN rm /app/firestore_reader/target/release/deps/firestore_reader*
 RUN cargo build --release
 
 
-FROM debian:bookworm-slim
+FROM debian:bookworm
 ARG APP=/usr/src/app
 
 RUN apt-get update \
