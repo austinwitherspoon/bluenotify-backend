@@ -502,11 +502,11 @@ async fn process_post(
         error!("Error acknowledging message: {:?}", ack);
         return;
     }
-    NOTIFICATIONS_SENT_COUNTER.inc();
+    NOTIFICATIONS_SENT_COUNTER.inc_by(fcm_recipients.len() as u64);
 
     let post_time = source_post.post_datetime();
     if let Some(post_time) = post_time {
-        let handle_time = post_time - chrono::Utc::now();
+        let handle_time = chrono::Utc::now() - post_time;
         POST_HANDLE_TIME.observe(handle_time.num_milliseconds() as f64 / 1000.0);
     }
 
