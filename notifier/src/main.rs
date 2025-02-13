@@ -8,15 +8,15 @@ use cached::proc_macro::cached;
 use futures::TryStreamExt;
 use lazy_static::lazy_static;
 use prometheus::{
-    self, register_histogram, register_int_counter, Encoder, IntGauge, Histogram, IntCounter,
-    TextEncoder, register_int_gauge,
+    self, register_histogram, register_int_counter, register_int_gauge, Encoder, Histogram,
+    IntCounter, IntGauge, TextEncoder,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tokio::runtime::Handle;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::runtime::Handle;
 use tokio::sync::RwLock;
 use tokio::task::JoinSet;
 use tokio::time::timeout;
@@ -39,17 +39,16 @@ lazy_static! {
     .unwrap();
     static ref POST_HANDLE_TIME: Histogram =
         register_histogram!("post_handle_time_seconds", "Time spent handling a post").unwrap();
-
     static ref TOKIO_QUEUED_TASKS: IntGauge = register_int_gauge!(
         "tokio_queued_tasks",
         "The number of tasks queued in the tokio runtime"
-    ).unwrap();
-
+    )
+    .unwrap();
     static ref TOKIO_ALIVE_TASKS: IntGauge = register_int_gauge!(
         "tokio_alive_tasks",
         "The number of living tasks in the tokio runtime"
-    ).unwrap();
-
+    )
+    .unwrap();
 }
 
 type SharedUserSettings = Arc<RwLock<AllUserSettings>>;
@@ -311,6 +310,75 @@ async fn load_bluesky_post(
     Ok(post)
 }
 
+async fn check_possible_recipient(
+    possible_recipient: String,
+    poster_did: String,
+    user_settings: SharedUserSettings,
+    post_type: PostType,
+    post: &JetstreamPost,
+    retry: RetryPolicy,
+) -> (String, bool) {
+    let user_settings = {
+        let all_settings = user_settings.read().await;
+        if !all_settings.settings.contains_key(&possible_recipient) {
+            return (possible_recipient, false);
+        }
+        all_settings
+            .settings
+            .get(&possible_recipient)
+            .unwrap()
+            .clone()
+    };
+
+    let wanted_post_types = &user_settings.settings.get(&poster_did).unwrap().post_types;
+
+    match post_type {
+        PostType::Post | PostType::Quote => {
+            if !wanted_post_types.contains(&user_settings::PostType::Post) {
+                return (possible_recipient, false);
+            }
+        }
+        PostType::Repost => {
+            if !wanted_post_types.contains(&user_settings::PostType::Repost) {
+                return (possible_recipient, false);
+            }
+        }
+        PostType::Reply => {
+            if wanted_post_types.contains(&user_settings::PostType::Reply) {
+                return (possible_recipient, true);
+            } else if wanted_post_types.contains(&user_settings::PostType::ReplyToFriend) {
+                let parent_poster_did = match &post.commit.record {
+                    Record::Post(record) => {
+                        let uri = record.reply.as_ref().unwrap().parent.uri.clone();
+                        parse_uri(&uri).unwrap().0
+                    }
+                    _ => return (possible_recipient, false),
+                };
+                let mut following = HashSet::new();
+                for bluesky_account_did in user_settings.accounts.iter() {
+                    let new_following = timeout(
+                        Duration::from_secs(60 * 5),
+                        retry.retry(|| get_following(bluesky_account_did)),
+                    )
+                    .await;
+                    if new_following.is_err() {
+                        error!("Timed out getting following for {:?}!", bluesky_account_did);
+                        continue;
+                    }
+                    let new_following = new_following.unwrap().unwrap_or_default();
+                    following.extend(new_following);
+                }
+                if !following.contains(&parent_poster_did) {
+                    return (possible_recipient, false);
+                }
+            } else {
+                return (possible_recipient, false);
+            }
+        }
+    };
+    (possible_recipient, true)
+}
+
 async fn process_post(
     post: JetstreamPost,
     nats_message: Message,
@@ -348,72 +416,42 @@ async fn process_post(
 
     // check if this post has any interested listeners BEFORE downloading anything else
     let fcm_recipients: HashSet<String> = {
-        let settings = user_settings.read().await;
-        let mut fcm_recipients = settings
-            .fcm_tokens_by_watched
-            .get(&poster_did)
-            .cloned()
-            .unwrap_or_default();
+        let mut fcm_recipients = {
+            user_settings
+                .read()
+                .await
+                .fcm_tokens_by_watched
+                .get(&poster_did)
+                .cloned()
+                .unwrap_or_default()
+        };
 
-        for possible_recipient in fcm_recipients.clone().iter() {
-            if !settings.settings.contains_key(possible_recipient) {
-                fcm_recipients.remove(possible_recipient);
+        let mut task_group = tokio::task::JoinSet::new();
+        for possible_recipient in fcm_recipients.iter() {
+            let user_settings = user_settings.clone();
+            let poster_did = poster_did.clone();
+            let post_type = post_type.clone();
+            let post = post.clone();
+            let possible_recipient = possible_recipient.clone();
+            let retry = retry.clone();
+            task_group.spawn(async move {
+                check_possible_recipient(
+                    possible_recipient,
+                    poster_did,
+                    user_settings,
+                    post_type,
+                    &post,
+                    retry.clone(),
+                )
+                .await
+            });
+        }
+
+        while let Some(result) = task_group.join_next().await {
+            let (recipient, should_notify) = result.unwrap();
+            if !should_notify {
+                fcm_recipients.remove(&recipient);
             }
-            let user_settings = settings.settings.get(possible_recipient).unwrap();
-            let wanted_post_types = &user_settings.settings.get(&poster_did).unwrap().post_types;
-
-            match post_type {
-                PostType::Post | PostType::Quote => {
-                    if !wanted_post_types.contains(&user_settings::PostType::Post) {
-                        fcm_recipients.remove(possible_recipient);
-                    }
-                }
-                PostType::Repost => {
-                    if !wanted_post_types.contains(&user_settings::PostType::Repost) {
-                        fcm_recipients.remove(possible_recipient);
-                    }
-                }
-                PostType::Reply => {
-                    if wanted_post_types.contains(&user_settings::PostType::Reply) {
-                        continue;
-                    } else if wanted_post_types.contains(&user_settings::PostType::ReplyToFriend) {
-                        let parent_poster_did = match &post.commit.record {
-                            Record::Post(record) => {
-                                let uri = record.reply.as_ref().unwrap().parent.uri.clone();
-                                parse_uri(&uri).unwrap().0
-                            }
-                            _ => continue,
-                        };
-                        debug!(
-                            "Checking if {} follows {}",
-                            possible_recipient, parent_poster_did
-                        );
-                        let mut following = HashSet::new();
-                        for bluesky_account_did in user_settings.accounts.iter() {
-                            let new_following = timeout(
-                                Duration::from_secs(60),
-                                retry.retry(|| get_following(bluesky_account_did)),
-                            )
-                            .await;
-                            if new_following.is_err() {
-                                error!(
-                                    "Timed out getting following for {:?}!",
-                                    bluesky_account_did
-                                );
-                                continue;
-                            }
-                            let new_following = new_following.unwrap().unwrap_or_default();
-                            following.extend(new_following);
-                        }
-                        debug!("{:?} Following: {:?}", possible_recipient, following);
-                        if !following.contains(&parent_poster_did) {
-                            fcm_recipients.remove(possible_recipient);
-                        }
-                    } else {
-                        fcm_recipients.remove(possible_recipient);
-                    }
-                }
-            };
         }
 
         fcm_recipients
@@ -431,7 +469,7 @@ async fn process_post(
     info!("Interested listeners found: {:?}", fcm_recipients);
 
     let user_name = timeout(
-        Duration::from_secs(60),
+        Duration::from_secs(60 * 5),
         retry.retry(|| get_bluesky_display_name_and_handle(&poster_did)),
     )
     .await
@@ -451,7 +489,7 @@ async fn process_post(
             match &source_post.commit.record {
                 Record::Repost(record) => {
                     source_post = match timeout(
-                        Duration::from_secs(60),
+                        Duration::from_secs(60 * 5),
                         retry.retry(|| load_bluesky_post(&record.subject.uri)),
                     )
                     .await
@@ -486,7 +524,7 @@ async fn process_post(
                     let uri = &reply_data.parent.uri;
                     let source_did = parse_uri(uri).unwrap().0;
                     let other_username = timeout(
-                        Duration::from_secs(60),
+                        Duration::from_secs(60 * 5),
                         retry.retry(|| get_bluesky_display_name_and_handle(&source_did)),
                     )
                     .await
@@ -536,7 +574,7 @@ async fn process_post(
     }
 
     let post_owner_handle = timeout(
-        Duration::from_secs(60),
+        Duration::from_secs(60 * 5),
         retry.retry(|| get_bluesky_display_name_and_handle(&source_post.did)),
     )
     .await
