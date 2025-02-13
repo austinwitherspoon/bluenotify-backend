@@ -39,11 +39,6 @@ lazy_static! {
     .unwrap();
     static ref POST_HANDLE_TIME: Histogram =
         register_histogram!("post_handle_time_seconds", "Time spent handling a post").unwrap();
-    static ref TOKIO_QUEUED_TASKS: IntGauge = register_int_gauge!(
-        "tokio_queued_tasks",
-        "The number of tasks queued in the tokio runtime"
-    )
-    .unwrap();
     static ref TOKIO_ALIVE_TASKS: IntGauge = register_int_gauge!(
         "tokio_alive_tasks",
         "The number of living tasks in the tokio runtime"
@@ -356,11 +351,14 @@ async fn check_possible_recipient(
                 };
                 let mut following = HashSet::new();
                 for bluesky_account_did in user_settings.accounts.iter() {
-                    let new_following = timeout(
-                        Duration::from_secs(60 * 5),
-                        retry.retry(|| get_following(bluesky_account_did)),
-                    )
-                    .await;
+                    let new_following = retry
+                        .retry(|| {
+                            timeout(
+                                Duration::from_secs(60 * 2),
+                                get_following(bluesky_account_did),
+                            )
+                        })
+                        .await;
                     if new_following.is_err() {
                         error!("Timed out getting following for {:?}!", bluesky_account_did);
                         continue;
@@ -468,14 +466,17 @@ async fn process_post(
     }
     info!("Interested listeners found: {:?}", fcm_recipients);
 
-    let user_name = timeout(
-        Duration::from_secs(60 * 5),
-        retry.retry(|| get_bluesky_display_name_and_handle(&poster_did)),
-    )
-    .await
-    .unwrap_or(Ok(("[error loading user]".to_string(), "".to_string())))
-    .unwrap_or(("[error loading user]".to_string(), "".to_string()))
-    .0;
+    let user_name = retry
+        .retry(|| {
+            timeout(
+                Duration::from_secs(60 * 1),
+                get_bluesky_display_name_and_handle(&poster_did),
+            )
+        })
+        .await
+        .unwrap_or(Ok(("[error loading user]".to_string(), "".to_string())))
+        .unwrap_or(("[error loading user]".to_string(), "".to_string()))
+        .0;
 
     let mut notification_title;
     let mut source_post = post;
@@ -488,11 +489,14 @@ async fn process_post(
             notification_title = format!("{} reposted:", user_name);
             match &source_post.commit.record {
                 Record::Repost(record) => {
-                    source_post = match timeout(
-                        Duration::from_secs(60 * 5),
-                        retry.retry(|| load_bluesky_post(&record.subject.uri)),
-                    )
-                    .await
+                    source_post = match retry
+                        .retry(|| {
+                            timeout(
+                                Duration::from_secs(60 * 1),
+                                load_bluesky_post(&record.subject.uri),
+                            )
+                        })
+                        .await
                     {
                         Ok(post) => match post {
                             Ok(post) => post,
@@ -523,14 +527,17 @@ async fn process_post(
                     let reply_data = record.reply.as_ref().unwrap();
                     let uri = &reply_data.parent.uri;
                     let source_did = parse_uri(uri).unwrap().0;
-                    let other_username = timeout(
-                        Duration::from_secs(60 * 5),
-                        retry.retry(|| get_bluesky_display_name_and_handle(&source_did)),
-                    )
-                    .await
-                    .unwrap_or(Ok(("[error loading user]".to_string(), "".to_string())))
-                    .unwrap_or(("[error loading user]".to_string(), "".to_string()))
-                    .0;
+                    let other_username = retry
+                        .retry(|| {
+                            timeout(
+                                Duration::from_secs(60 * 1),
+                                get_bluesky_display_name_and_handle(&source_did),
+                            )
+                        })
+                        .await
+                        .unwrap_or(Ok(("[error loading user]".to_string(), "".to_string())))
+                        .unwrap_or(("[error loading user]".to_string(), "".to_string()))
+                        .0;
                     notification_title = format!("{} replied to {}:", user_name, other_username);
                 }
                 _ => {}
@@ -573,14 +580,17 @@ async fn process_post(
         }
     }
 
-    let post_owner_handle = timeout(
-        Duration::from_secs(60 * 5),
-        retry.retry(|| get_bluesky_display_name_and_handle(&source_post.did)),
-    )
-    .await
-    .unwrap_or(Ok(("".to_string(), (&source_post.did.clone()).to_owned())))
-    .unwrap_or(("".to_string(), (&source_post.did.clone()).to_owned()))
-    .1;
+    let post_owner_handle = retry
+        .retry(|| {
+            timeout(
+                Duration::from_secs(60 * 1),
+                get_bluesky_display_name_and_handle(&source_post.did),
+            )
+        })
+        .await
+        .unwrap_or(Ok(("".to_string(), (&source_post.did.clone()).to_owned())))
+        .unwrap_or(("".to_string(), (&source_post.did.clone()).to_owned()))
+        .1;
 
     let rkey = source_post.commit.rkey.clone();
 
@@ -673,7 +683,8 @@ async fn listen_to_posts(
             "watched_posts",
             async_nats::jetstream::consumer::pull::Config {
                 durable_name: Some("notifier_post_listener".to_string()),
-                deliver_policy: async_nats::jetstream::consumer::DeliverPolicy::All,
+                deliver_policy: async_nats::jetstream::consumer::DeliverPolicy::New,
+                ack_wait: Duration::from_secs(60 * 5),
                 ..Default::default()
             },
         )
@@ -718,18 +729,21 @@ async fn listen_to_posts(
                 let fcm_client = fcm_client.clone();
                 debug!("Spawning process_post");
                 async move {
-                    process_post(post, message, user_settings, fcm_client)
-                        .instrument(span!(
-                            Level::INFO,
-                            "Process Post",
-                            post_id = post_id.as_str()
-                        ))
+                    let result =
+                        timeout(
+                            Duration::from_secs(60 * 5),
+                            process_post(post, message, user_settings, fcm_client).instrument(
+                                span!(Level::INFO, "process", post_id = post_id.as_str()),
+                            ),
+                        )
                         .await;
+                    if result.is_err() {
+                        error!("Processing timed out after 5 minutes: {:?}", result);
+                    }
                 }
             });
 
             TOKIO_ALIVE_TASKS.set(metrics.num_alive_tasks() as i64);
-            TOKIO_QUEUED_TASKS.set(metrics.global_queue_depth() as i64);
         }
     }
 }
