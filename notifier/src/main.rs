@@ -8,7 +8,8 @@ use cached::proc_macro::cached;
 use futures::TryStreamExt;
 use lazy_static::lazy_static;
 use prometheus::{
-    self, register_histogram, register_int_counter, Encoder, Gauge, Histogram, IntCounter, TextEncoder
+    self, register_histogram, register_int_counter, Encoder, Gauge, Histogram, IntCounter,
+    TextEncoder,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -17,7 +18,8 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
 use tokio::task::JoinSet;
-use tracing::{debug, error, info, warn};
+use tokio::time::timeout;
+use tracing::{debug, error, info, info_span, span, warn, Instrument, Level};
 use user_settings::{AllUserSettings, UserSettingsMap};
 mod fcm;
 use crate::fcm::FcmClient;
@@ -34,11 +36,8 @@ lazy_static! {
         "The number of notifications sent by the server"
     )
     .unwrap();
-    static ref POST_HANDLE_TIME: Histogram = register_histogram!(
-        "post_handle_time_seconds",
-        "Time spent handling a post"
-    )
-    .unwrap();
+    static ref POST_HANDLE_TIME: Histogram =
+        register_histogram!("post_handle_time_seconds", "Time spent handling a post").unwrap();
 }
 
 type SharedUserSettings = Arc<RwLock<AllUserSettings>>;
@@ -62,6 +61,12 @@ impl JetstreamPost {
             return None;
         }
         Some(result.unwrap())
+    }
+
+    fn post_id(&self) -> String {
+        let rkey = &self.commit.rkey;
+        let did = &self.did;
+        format!("{}:{}", did, rkey)
     }
 
     fn parse_raw_json(
@@ -104,6 +109,7 @@ impl JetstreamPost {
     }
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
 enum PostType {
     Post,
     Repost,
@@ -173,7 +179,8 @@ struct ReplyData {
 }
 
 #[cached(
-    time = 1800,
+    time = 3600,
+    size = 10_000,
     result = true,
     sync_writes = true,
     key = "String",
@@ -199,8 +206,8 @@ async fn get_bluesky_display_name_and_handle(
         return Err(msg.into());
     }
     let json: Value = response.json().await.unwrap();
-    let handle = json["handle"].as_str().unwrap();
-    let mut display = json["displayName"].as_str().unwrap();
+    let handle = json["handle"].as_str().unwrap_or("[No handle]");
+    let mut display = json["displayName"].as_str().unwrap_or("");
 
     if display.is_empty() {
         display = handle;
@@ -209,7 +216,8 @@ async fn get_bluesky_display_name_and_handle(
 }
 
 #[cached(
-    time = 1800,
+    time = 900,
+    size = 1000,
     result = true,
     sync_writes = true,
     key = "String",
@@ -295,8 +303,9 @@ async fn process_post(
     post: JetstreamPost,
     nats_message: Message,
     user_settings: SharedUserSettings,
-    fcm_client: Arc<RwLock<FcmClient>>,
+    fcm_client: Arc<FcmClient>,
 ) {
+    info!("Processing post: {:?}", post.post_id());
     let poster_did = post.did.clone();
 
     let post_type = match &post.commit.record {
@@ -322,6 +331,8 @@ async fn process_post(
     let retry = RetryPolicy::fixed(Duration::from_millis(5000))
         .with_max_retries(10)
         .with_jitter(false);
+
+    info!("Post type: {:?}", post_type);
 
     // check if this post has any interested listeners BEFORE downloading anything else
     let fcm_recipients: HashSet<String> = {
@@ -367,10 +378,19 @@ async fn process_post(
                         );
                         let mut following = HashSet::new();
                         for bluesky_account_did in user_settings.accounts.iter() {
-                            let new_following = retry
-                                .retry(|| get_following(bluesky_account_did))
-                                .await
-                                .unwrap_or_default();
+                            let new_following = timeout(
+                                Duration::from_secs(60),
+                                retry.retry(|| get_following(bluesky_account_did)),
+                            )
+                            .await;
+                            if new_following.is_err() {
+                                error!(
+                                    "Timed out getting following for {:?}!",
+                                    bluesky_account_did
+                                );
+                                continue;
+                            }
+                            let new_following = new_following.unwrap().unwrap_or_default();
                             following.extend(new_following);
                         }
                         debug!("{:?} Following: {:?}", possible_recipient, following);
@@ -398,11 +418,14 @@ async fn process_post(
     }
     info!("Interested listeners found: {:?}", fcm_recipients);
 
-    let user_name = retry
-        .retry(|| get_bluesky_display_name_and_handle(&poster_did))
-        .await
-        .unwrap_or(("[error loading user]".to_string(), "".to_string()))
-        .0;
+    let user_name = timeout(
+        Duration::from_secs(60),
+        retry.retry(|| get_bluesky_display_name_and_handle(&poster_did)),
+    )
+    .await
+    .unwrap_or(Ok(("[error loading user]".to_string(), "".to_string())))
+    .unwrap_or(("[error loading user]".to_string(), "".to_string()))
+    .0;
 
     let mut notification_title;
     let mut source_post = post;
@@ -415,11 +438,21 @@ async fn process_post(
             notification_title = format!("{} reposted:", user_name);
             match &source_post.commit.record {
                 Record::Repost(record) => {
-                    source_post = match retry.retry(|| load_bluesky_post(&record.subject.uri)).await
+                    source_post = match timeout(
+                        Duration::from_secs(60),
+                        retry.retry(|| load_bluesky_post(&record.subject.uri)),
+                    )
+                    .await
                     {
-                        Ok(post) => post,
+                        Ok(post) => match post {
+                            Ok(post) => post,
+                            Err(e) => {
+                                error!("Error loading Repost: {:?}", e);
+                                return;
+                            }
+                        },
                         Err(e) => {
-                            error!("Error loading repost: {:?}", e);
+                            error!("Loading Repost timed out: {:?}", e);
                             return;
                         }
                     };
@@ -440,11 +473,14 @@ async fn process_post(
                     let reply_data = record.reply.as_ref().unwrap();
                     let uri = &reply_data.parent.uri;
                     let source_did = parse_uri(uri).unwrap().0;
-                    let other_username = retry
-                        .retry(|| get_bluesky_display_name_and_handle(&source_did))
-                        .await
-                        .unwrap_or(("[error loading user]".to_string(), "".to_string()))
-                        .0;
+                    let other_username = timeout(
+                        Duration::from_secs(60),
+                        retry.retry(|| get_bluesky_display_name_and_handle(&source_did)),
+                    )
+                    .await
+                    .unwrap_or(Ok(("[error loading user]".to_string(), "".to_string())))
+                    .unwrap_or(("[error loading user]".to_string(), "".to_string()))
+                    .0;
                     notification_title = format!("{} replied to {}:", user_name, other_username);
                 }
                 _ => {}
@@ -487,11 +523,14 @@ async fn process_post(
         }
     }
 
-    let post_owner_handle = retry
-        .retry(|| get_bluesky_display_name_and_handle(&source_post.did))
-        .await
-        .unwrap_or(("".to_string(), (&source_post.did.clone()).to_owned()))
-        .1;
+    let post_owner_handle = timeout(
+        Duration::from_secs(60),
+        retry.retry(|| get_bluesky_display_name_and_handle(&source_post.did)),
+    )
+    .await
+    .unwrap_or(Ok(("".to_string(), (&source_post.did.clone()).to_owned())))
+    .unwrap_or(("".to_string(), (&source_post.did.clone()).to_owned()))
+    .1;
 
     let rkey = source_post.commit.rkey.clone();
 
@@ -521,7 +560,7 @@ async fn process_post(
 }
 
 async fn send_notification(
-    fcm_client: Arc<RwLock<FcmClient>>,
+    fcm_client: Arc<FcmClient>,
     fcm_recipients: HashSet<String>,
     title: String,
     body: String,
@@ -531,12 +570,14 @@ async fn send_notification(
     info!("Title: {}", title);
     info!("Body: {}", body);
     info!("URL: {}", url);
-    let mock = std::env::var("MOCK").unwrap_or("false".to_string()).to_ascii_lowercase() == "true";
+    let mock = std::env::var("MOCK")
+        .unwrap_or("false".to_string())
+        .to_ascii_lowercase()
+        == "true";
     if mock {
         warn!("Mock mode, will not send notification!");
         return;
     }
-    let fcm_client = fcm_client.write().await;
     let mut message = serde_json::json!({
         "validate_only": false,
         "message": {
@@ -563,7 +604,6 @@ async fn send_notification(
             }
         }
     });
-    // let response = client.send(message).await?;
     for fcm_token in fcm_recipients {
         message["message"]["token"] = Value::String(fcm_token);
         let response = fcm_client.send(message.clone()).await;
@@ -576,7 +616,7 @@ async fn send_notification(
 async fn listen_to_posts(
     posts_stream: Stream,
     user_settings: SharedUserSettings,
-    fcm_client: Arc<RwLock<FcmClient>>,
+    fcm_client: Arc<FcmClient>,
 ) {
     let consumer = posts_stream
         .get_or_create_consumer(
@@ -600,25 +640,38 @@ async fn listen_to_posts(
                     "Failed to deserialize post: {:?}\nData: {}",
                     post, json_string
                 );
+                _ = message.ack().await;
                 continue;
             }
             info!("Received post: {:?}", post);
             RECEIVED_MESSAGES_COUNTER.inc();
 
             let post = post.unwrap();
-            let post_datetime = post.post_datetime().unwrap();
+            let post_datetime = post.post_datetime();
+            if post_datetime.is_none() {
+                error!("Error parsing post datetime");
+                _ = message.ack().await;
+                continue;
+            }
             let now = chrono::Utc::now();
-            if now - post_datetime > OLDEST_POST_AGE {
+            if now - post_datetime.unwrap() > OLDEST_POST_AGE {
                 // this post is too old, ignore it
                 info!("Post is too old, ignoring");
                 _ = message.ack().await;
                 continue;
             }
+            let post_id = post.post_id();
             tokio::spawn({
                 let user_settings = user_settings.clone();
                 let fcm_client = fcm_client.clone();
                 async move {
-                    process_post(post, message, user_settings, fcm_client).await;
+                    process_post(post, message, user_settings, fcm_client)
+                        .instrument(span!(
+                            Level::INFO,
+                            "Process Post",
+                            post_id = post_id.as_str()
+                        ))
+                        .await;
                 }
             });
         }
@@ -692,7 +745,7 @@ async fn _main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     let service_account_path = "./cert.json";
     // Create a new FCM client
-    let fcm_client = Arc::new(RwLock::new(FcmClient::new(service_account_path).await?));
+    let fcm_client = Arc::new(FcmClient::new(service_account_path).await?);
 
     let axum_url = std::env::var("BIND_NOTIFIER").unwrap_or("0.0.0.0:8003".to_string());
 
@@ -740,18 +793,21 @@ async fn _main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
 fn main() {
     let sentry_dsn = std::env::var("SENTRY_DSN");
-    if sentry_dsn.is_ok() {
-        let _guard = sentry::init((sentry_dsn.ok(), sentry::ClientOptions {
-            release: sentry::release_name!(),
-            ..Default::default()
-        }));
+    if sentry_dsn.is_ok() && !sentry_dsn.as_ref().unwrap().is_empty() {
+        let _guard = sentry::init((
+            sentry_dsn.ok(),
+            sentry::ClientOptions {
+                release: sentry::release_name!(),
+                ..Default::default()
+            },
+        ));
     }
-    
+
     _ = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .unwrap()
-            .block_on(_main());
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(_main());
 }
 
 #[cfg(test)]

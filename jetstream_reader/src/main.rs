@@ -364,7 +364,7 @@ async fn _main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
 fn main() {
     let sentry_dsn = std::env::var("SENTRY_DSN");
-    if sentry_dsn.is_ok() {
+    if sentry_dsn.is_ok() && !sentry_dsn.as_ref().unwrap().is_empty() {
         let _guard = sentry::init((sentry_dsn.ok(), sentry::ClientOptions {
             release: sentry::release_name!(),
             ..Default::default()
