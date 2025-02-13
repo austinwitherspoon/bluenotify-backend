@@ -58,7 +58,7 @@ services:
       - BIND_NOTIFIER=0.0.0.0:8000
       - GOOGLE_APPLICATION_CREDENTIALS=./cert.json
       - MOCK=${MOCK}
-      - RUST_LOG=info
+      - RUST_LOG=info,notifier:debug
       - RUST_BACKTRACE=1
       - SENTRY_DSN=${SENTRY_DSN}
     volumes:

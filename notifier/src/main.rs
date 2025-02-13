@@ -8,18 +8,19 @@ use cached::proc_macro::cached;
 use futures::TryStreamExt;
 use lazy_static::lazy_static;
 use prometheus::{
-    self, register_histogram, register_int_counter, Encoder, Gauge, Histogram, IntCounter,
-    TextEncoder,
+    self, register_histogram, register_int_counter, Encoder, IntGauge, Histogram, IntCounter,
+    TextEncoder, register_int_gauge,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use tokio::runtime::Handle;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
 use tokio::task::JoinSet;
 use tokio::time::timeout;
-use tracing::{debug, error, info, info_span, span, warn, Instrument, Level};
+use tracing::{debug, error, info, span, warn, Instrument, Level};
 use user_settings::{AllUserSettings, UserSettingsMap};
 mod fcm;
 use crate::fcm::FcmClient;
@@ -38,6 +39,17 @@ lazy_static! {
     .unwrap();
     static ref POST_HANDLE_TIME: Histogram =
         register_histogram!("post_handle_time_seconds", "Time spent handling a post").unwrap();
+
+    static ref TOKIO_QUEUED_TASKS: IntGauge = register_int_gauge!(
+        "tokio_queued_tasks",
+        "The number of tasks queued in the tokio runtime"
+    ).unwrap();
+
+    static ref TOKIO_ALIVE_TASKS: IntGauge = register_int_gauge!(
+        "tokio_alive_tasks",
+        "The number of living tasks in the tokio runtime"
+    ).unwrap();
+
 }
 
 type SharedUserSettings = Arc<RwLock<AllUserSettings>>;
@@ -630,6 +642,8 @@ async fn listen_to_posts(
         .await
         .unwrap();
 
+    let metrics = Handle::current().metrics();
+
     loop {
         let mut messages = consumer.messages().await.unwrap();
         while let Ok(Some(message)) = messages.try_next().await {
@@ -664,6 +678,7 @@ async fn listen_to_posts(
             tokio::spawn({
                 let user_settings = user_settings.clone();
                 let fcm_client = fcm_client.clone();
+                debug!("Spawning process_post");
                 async move {
                     process_post(post, message, user_settings, fcm_client)
                         .instrument(span!(
@@ -674,6 +689,9 @@ async fn listen_to_posts(
                         .await;
                 }
             });
+
+            TOKIO_ALIVE_TASKS.set(metrics.num_alive_tasks() as i64);
+            TOKIO_QUEUED_TASKS.set(metrics.global_queue_depth() as i64);
         }
     }
 }
@@ -693,7 +711,7 @@ async fn initial_load_user_settings(kv_store: &Store, current_settings: SharedUs
     current_settings.settings.clear();
     current_settings.settings.extend(new_settings.unwrap());
     current_settings.rebuild_cache();
-    println!(
+    info!(
         "Loaded settings. Length: {:?}",
         current_settings.settings.len()
     );
@@ -715,11 +733,12 @@ async fn listen_to_user_settings(kv_store: Store, current_settings: SharedUserSe
                 error!("Error deserializing user settings: {:?}", new_settings);
                 continue;
             }
+            info!("Received new settings!");
             let mut current_settings = current_settings.write().await;
             current_settings.settings.clear();
             current_settings.settings.extend(new_settings.unwrap());
             current_settings.rebuild_cache();
-            println!(
+            info!(
                 "Updated settings. Length: {:?}",
                 current_settings.settings.len()
             );
