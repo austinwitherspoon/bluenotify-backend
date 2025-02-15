@@ -37,8 +37,15 @@ lazy_static! {
         "The number of notifications sent by the server"
     )
     .unwrap();
-    static ref POST_HANDLE_TIME: Histogram =
-        register_histogram!("post_handle_time_seconds", "Time spent handling a post").unwrap();
+    static ref POST_HANDLE_TIME: Histogram = register_histogram!(
+        "post_handle_time_seconds",
+        "Time spent handling a post",
+        vec![
+            0.5, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 12.5, 15.0, 17.5, 20.0, 30.0,
+            40.0, 50.0, 60.0, 120.0, 180.0, 240.0, 300.0, 360.0
+        ]
+    )
+    .unwrap();
     static ref TOKIO_ALIVE_TASKS: IntGauge = register_int_gauge!(
         "tokio_alive_tasks",
         "The number of living tasks in the tokio runtime"
@@ -809,6 +816,10 @@ async fn metrics() -> String {
 async fn _main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     tracing_subscriber::fmt::init();
 
+    TOKIO_ALIVE_TASKS.set(0);
+    RECEIVED_MESSAGES_COUNTER.reset();
+    NOTIFICATIONS_SENT_COUNTER.reset();
+
     let mut nats_host = std::env::var("NATS_HOST").unwrap_or("localhost".to_string());
     if !nats_host.contains(':') {
         nats_host.push_str(":4222");
@@ -840,7 +851,7 @@ async fn _main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let posts_stream = nats_js.get_stream("watched_posts").await?;
 
     let axum_app = Router::new()
-        .route("/", get(|| async { "Jetstream_reader server online." }))
+        .route("/", get(|| async { "Notifier server online." }))
         .route("/metrics", get(metrics));
     info!("Listening for HTTP requests on {}", axum_url);
     let axum_listener = tokio::net::TcpListener::bind(axum_url).await.unwrap();
