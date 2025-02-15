@@ -193,7 +193,7 @@ struct ReplyData {
 
 #[cached(
     time = 3600,
-    size = 10_000,
+    size = 30_000,
     result = true,
     sync_writes = true,
     key = "String",
@@ -229,8 +229,8 @@ async fn get_bluesky_display_name_and_handle(
 }
 
 #[cached(
-    time = 900,
-    size = 1000,
+    time = 3600,
+    size = 10_000,
     result = true,
     sync_writes = true,
     key = "String",
