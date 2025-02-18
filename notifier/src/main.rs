@@ -573,7 +573,7 @@ async fn process_post(
         .0;
 
     let mut notification_title;
-    let mut source_post = post;
+    let mut source_post = post.clone();
 
     match post_type {
         PostType::Post => {
@@ -699,7 +699,7 @@ async fn process_post(
     }
     NOTIFICATIONS_SENT_COUNTER.inc_by(fcm_recipients.len() as u64);
 
-    let post_time = source_post.event_datetime();
+    let post_time = post.event_datetime();
     if let Some(post_time) = post_time {
         let handle_time = (chrono::Utc::now() - post_time).num_milliseconds() as f64 / 1000.0;
         info!("Post handle time: {:?}", handle_time);
