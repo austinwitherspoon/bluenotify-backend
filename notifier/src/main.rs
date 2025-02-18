@@ -191,18 +191,36 @@ struct ReplyData {
     parent: RecordReference,
 }
 
-#[cached(
-    time = 3600,
-    size = 30_000,
-    result = true,
-    sync_writes = true,
-    key = "String",
-    convert = r#"{ format!("{}", did) }"#
-)]
 async fn get_bluesky_display_name_and_handle(
     did: &str,
     client: Option<reqwest::Client>,
+    cache: Option<Store>,
 ) -> Result<(String, String), Box<dyn std::error::Error + Send + Sync>> {
+    let cache_key = format!("display_name.{}", did.replace(":", "_"));
+
+    if let Some(cache) = cache.clone() {
+        debug!("Checking cache for handle for {:?}: Key: {:?}", did, cache_key);
+        let cached = cache.get(&cache_key).await;
+        if let Ok(cached) = cached {
+            if let Some(cached) = cached {
+                let cached = String::from_utf8(cached.into());
+                if cached.is_err() {
+                    let msg: String = cached.unwrap_err().to_string();
+                    error!("Error getting handle, corrupt cache: {}", msg);
+                } else {
+                    debug!("Using cached handle for {:?}", did);
+                    let (display, handle): (String, String) = serde_json::from_str(&cached.unwrap()).unwrap();
+                    return Ok((display, handle));
+                }
+            } else {
+                debug!("No cached handle for {:?}", did);
+            }
+        } else {
+            let msg: String = cached.unwrap_err().to_string();
+            error!("Error getting handle from cache: {}", msg);
+        }
+    }
+
     debug!("Getting handle for {:?}", did);
     let start = chrono::Utc::now();
     let url = format!(
@@ -234,21 +252,46 @@ async fn get_bluesky_display_name_and_handle(
     let duration = end - start;
     debug!("Got handle for {:?} in {:?}", did, duration);
 
-    Ok((display.to_string(), handle.to_string()))
+    let result = (display.to_string(), handle.to_string());
+
+    if let Some(cache) = cache {
+        _ = cache.put(&cache_key, serde_json::to_string(&result).unwrap().into()).await;
+    }
+
+    Ok(result)
 }
 
-#[cached(
-    time = 3600,
-    size = 10_000,
-    result = true,
-    sync_writes = true,
-    key = "String",
-    convert = r#"{ format!("{}", did) }"#
-)]
+
 async fn get_following(
     did: &str,
     client: Option<reqwest::Client>,
+    cache: Option<Store>,
 ) -> Result<HashSet<String>, Box<dyn std::error::Error + Send + Sync>> {
+
+    let cache_key = format!("following.{}", did.replace(":", "_"));
+
+    if let Some(cache) = cache.clone() {
+        debug!("Checking cache for following for {:?}: Key: {:?}", did, cache_key);
+        let cached = cache.get(&cache_key).await;
+        if let Ok(cached) = cached {
+            if let Some(cached) = cached {
+                let cached = String::from_utf8(cached.into());
+                if cached.is_err() {
+                    let msg: String = cached.unwrap_err().to_string();
+                    error!("Error getting following, corrupt cache: {}", msg);
+                } else {
+                    debug!("Using cached following for {:?}", did);
+                    let following: HashSet<String> = serde_json::from_str(&cached.unwrap()).unwrap();
+                    return Ok(following);
+                }
+            } else {
+                debug!("No cached following for {:?}", did);
+            }
+        } else {
+            let msg: String = cached.unwrap_err().to_string();
+            error!("Error getting following from cache: {}", msg);
+        }
+    }
 
     debug!("Getting following for {:?}", did);
     let start = chrono::Utc::now();
@@ -289,6 +332,10 @@ async fn get_following(
     let end = chrono::Utc::now();
     let duration = end - start;
     debug!("Got following for {:?} in {:?}", did, duration);
+
+    if let Some(cache) = cache {
+        _ = cache.put(&cache_key, serde_json::to_string(&following).unwrap().into()).await;
+    }
 
     Ok(following)
 }
@@ -343,6 +390,7 @@ async fn check_possible_recipient(
     post: &JetstreamPost,
     retry: RetryPolicy,
     client: Option<reqwest::Client>,
+    cache: Store,
 ) -> (String, bool) {
     let user_settings = {
         let all_settings = user_settings.read().await;
@@ -387,7 +435,7 @@ async fn check_possible_recipient(
                         .retry(|| {
                             timeout(
                                 Duration::from_secs(60),
-                                get_following(bluesky_account_did, client.clone()),
+                                get_following(bluesky_account_did, client.clone(), Some(cache.clone())),
                             )
                         })
                         .await;
@@ -414,6 +462,7 @@ async fn process_post(
     nats_message: Option<Message>,
     user_settings: SharedUserSettings,
     fcm_client: Option<Arc<FcmClient>>,
+    cache: Store,
 ) {
     info!("Processing post: {:?}", post.post_id());
     let poster_did = post.did.clone();
@@ -467,6 +516,7 @@ async fn process_post(
             let possible_recipient = possible_recipient.clone();
             let retry = retry.clone();
             let client = client.clone();
+            let cache = cache.clone();
             task_group.spawn(async move {
                 check_possible_recipient(
                     possible_recipient,
@@ -476,6 +526,7 @@ async fn process_post(
                     &post,
                     retry.clone(),
                     Some(client.clone()),
+                    cache.clone(),
                 )
                 .await
             });
@@ -509,7 +560,7 @@ async fn process_post(
         .retry(|| {
             timeout(
                 Duration::from_secs(60 * 1),
-                get_bluesky_display_name_and_handle(&poster_did, Some(client.clone())),
+                get_bluesky_display_name_and_handle(&poster_did, Some(client.clone()), Some(cache.clone())),
             )
         })
         .await
@@ -570,7 +621,7 @@ async fn process_post(
                         .retry(|| {
                             timeout(
                                 Duration::from_secs(60 * 1),
-                                get_bluesky_display_name_and_handle(&source_did, Some(client.clone())),
+                                get_bluesky_display_name_and_handle(&source_did, Some(client.clone()), Some(cache.clone())),
                             )
                         })
                         .await
@@ -623,7 +674,7 @@ async fn process_post(
         .retry(|| {
             timeout(
                 Duration::from_secs(60 * 1),
-                get_bluesky_display_name_and_handle(&source_post.did, Some(client.clone())),
+                get_bluesky_display_name_and_handle(&source_post.did, Some(client.clone()), Some(cache.clone())),
             )
         })
         .await
@@ -719,6 +770,7 @@ async fn listen_to_posts(
     posts_stream: Stream,
     user_settings: SharedUserSettings,
     fcm_client: Arc<FcmClient>,
+    cache: Store,
 ) {
     let consumer = posts_stream
         .get_or_create_consumer(
@@ -769,12 +821,13 @@ async fn listen_to_posts(
             tokio::spawn({
                 let user_settings = user_settings.clone();
                 let fcm_client = fcm_client.clone();
+                let cache = cache.clone();
                 debug!("Spawning process_post");
                 async move {
                     let result =
                         timeout(
                             Duration::from_secs(60 * 5),
-                            process_post(post, Some(message), user_settings, Some(fcm_client)).instrument(
+                            process_post(post, Some(message), user_settings, Some(fcm_client), cache).instrument(
                                 span!(Level::INFO, "process", post_id = post_id.as_str()),
                             ),
                         )
@@ -870,6 +923,7 @@ async fn _main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let nats_client = async_nats::connect(nats_host).await?;
     let nats_js = async_nats::jetstream::new(nats_client);
 
+    // Get key/value store
     _ = nats_js
         .create_key_value(async_nats::jetstream::kv::Config {
             bucket: "bluenotify_kv_store".to_string(),
@@ -878,6 +932,18 @@ async fn _main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         })
         .await;
     let kv_store = nats_js.get_key_value("bluenotify_kv_store").await.unwrap();
+
+    // Get cache
+    _ = nats_js
+        .create_key_value(async_nats::jetstream::kv::Config {
+            bucket: "bluenotify_cache".to_string(),
+            history: 1,
+            max_age: Duration::from_secs(60 * 60 * 1),
+            ..Default::default()
+        })
+        .await;
+    let cache = nats_js.get_key_value("bluenotify_cache").await.unwrap();
+
     let user_settings: SharedUserSettings =
         Arc::new(RwLock::new(AllUserSettings::new(HashMap::new())));
 
@@ -897,7 +963,7 @@ async fn _main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     });
     let shared_settings = user_settings.clone();
     tasks.spawn(async move {
-        listen_to_posts(posts_stream, shared_settings, fcm_client.clone()).await;
+        listen_to_posts(posts_stream, shared_settings, fcm_client.clone(), cache).await;
     });
     let shared_settings = user_settings.clone();
     tasks.spawn(async move {
@@ -934,13 +1000,13 @@ mod tests {
     #[tokio::test]
     async fn test_username() {
         let did = "did:plc:jpkjnmydclkafjyicv3s6hcx";
-        let handle = get_bluesky_display_name_and_handle(did, None).await;
+        let handle = get_bluesky_display_name_and_handle(did, None, None).await;
         assert_eq!(handle.unwrap().1, "austinwitherspoon.com");
     }
     #[tokio::test]
     async fn test_follows() {
         let did = "did:plc:jpkjnmydclkafjyicv3s6hcx";
-        let follows = get_following(did, None).await;
+        let follows = get_following(did, None, None).await;
         println!("{:?}", follows);
         assert!(follows.unwrap().len() > 60);
     }
@@ -1006,6 +1072,17 @@ mod tests {
             })
             .await;
         let kv_store = nats_js.get_key_value("bluenotify_kv_store").await.unwrap();
+
+        _ = nats_js
+        .create_key_value(async_nats::jetstream::kv::Config {
+            bucket: "bluenotify_cache".to_string(),
+            history: 1,
+            max_age: Duration::from_secs(60 * 60 * 1),
+            ..Default::default()
+        })
+        .await;
+        let cache = nats_js.get_key_value("bluenotify_cache").await.unwrap();
+
         let user_settings: SharedUserSettings =
             Arc::new(RwLock::new(AllUserSettings::new(HashMap::new())));
 
@@ -1016,7 +1093,7 @@ mod tests {
         
         let post = JetstreamPost { did: "did:plc:kqbyr4gqt6p2l57htlsa4nha".to_string(), time_us: 1739837485310201, commit: Commit { rkey: "3lifxxkth7c2q".to_string(), record: Record::Post(PostRecord { record_type: "app.bsky.feed.post".to_string(), created_at: "2025-02-18T00:11:21.451Z".to_string(), text: "Last one…on the stairs outside my office. Must have somehow landed on my body and then fallen off while I was walking inside.".to_string(), embed: Some(Embed { embed_type: "app.bsky.embed.images".to_string(), record: None, media: None }), reply: Some(ReplyData { parent: RecordReference { cid: "bafyreicbdrk75lsf423vlyxvc6vup4egs2rohhfvy4j3dghm7lwt4rmi4y".to_string(), uri: "at://did:plc:kqbyr4gqt6p2l57htlsa4nha/app.bsky.feed.post/3lifmahwils2g".to_string() } }) }) } };
 
-        process_post(post, None, shared_settings, None).await;
+        process_post(post, None, shared_settings, None, cache).await;
 
         let end_time = chrono::Utc::now();
         let duration = end_time - start_time;
