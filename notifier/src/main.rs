@@ -697,8 +697,9 @@ async fn process_post(
 
     let post_time = source_post.post_datetime();
     if let Some(post_time) = post_time {
-        let handle_time = chrono::Utc::now() - post_time;
-        POST_HANDLE_TIME.observe(handle_time.num_milliseconds() as f64 / 1000.0);
+        let handle_time = (chrono::Utc::now() - post_time).num_milliseconds() as f64 / 1000.0;
+        info!("Post handle time: {:?}", handle_time);
+        POST_HANDLE_TIME.observe(handle_time);
     }
 
     send_notification(
