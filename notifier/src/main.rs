@@ -58,7 +58,7 @@ type SharedUserSettings = Arc<RwLock<AllUserSettings>>;
 #[derive(Debug, Clone, Deserialize, Serialize)]
 struct JetstreamPost {
     did: String,
-    time_us: u64,
+    time_us: u64, // microseconds timestamp
     commit: Commit,
 }
 
@@ -74,6 +74,10 @@ impl JetstreamPost {
             return None;
         }
         Some(result.unwrap())
+    }
+
+    fn event_datetime(&self) -> Option<chrono::DateTime<chrono::Utc>> {
+        chrono::DateTime::from_timestamp_micros(self.time_us as i64)
     }
 
     fn post_id(&self) -> String {
@@ -695,7 +699,7 @@ async fn process_post(
     }
     NOTIFICATIONS_SENT_COUNTER.inc_by(fcm_recipients.len() as u64);
 
-    let post_time = source_post.post_datetime();
+    let post_time = source_post.event_datetime();
     if let Some(post_time) = post_time {
         let handle_time = (chrono::Utc::now() - post_time).num_milliseconds() as f64 / 1000.0;
         info!("Post handle time: {:?}", handle_time);
