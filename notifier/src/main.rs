@@ -201,12 +201,16 @@ struct ReplyData {
 )]
 async fn get_bluesky_display_name_and_handle(
     did: &str,
+    client: Option<reqwest::Client>,
 ) -> Result<(String, String), Box<dyn std::error::Error + Send + Sync>> {
+    debug!("Getting handle for {:?}", did);
+    let start = chrono::Utc::now();
     let url = format!(
         "https://public.api.bsky.app/xrpc/app.bsky.actor.getProfile?actor={}",
         did
     );
-    let response = reqwest::get(&url).await;
+    let client = client.unwrap_or_else(|| reqwest::Client::new());
+    let response = client.get(&url).send().await;
     if response.is_err() {
         let msg: String = response.unwrap_err().to_string();
         error!("Error getting handle: {}", msg);
@@ -225,6 +229,11 @@ async fn get_bluesky_display_name_and_handle(
     if display.is_empty() {
         display = handle;
     }
+
+    let end = chrono::Utc::now();
+    let duration = end - start;
+    debug!("Got handle for {:?} in {:?}", did, duration);
+
     Ok((display.to_string(), handle.to_string()))
 }
 
@@ -238,16 +247,23 @@ async fn get_bluesky_display_name_and_handle(
 )]
 async fn get_following(
     did: &str,
+    client: Option<reqwest::Client>,
 ) -> Result<HashSet<String>, Box<dyn std::error::Error + Send + Sync>> {
+
+    debug!("Getting following for {:?}", did);
+    let start = chrono::Utc::now();
+    let client = client.unwrap_or_else(|| reqwest::Client::new());
+
     let mut cursor: Option<String> = None;
     let mut following = HashSet::new();
     loop {
         let url = format!(
-            "https://public.api.bsky.app/xrpc/app.bsky.graph.getFollows?actor={}&cursor={}",
+            "https://public.api.bsky.app/xrpc/app.bsky.graph.getFollows?actor={}&limit=100&cursor={}",
             did,
             cursor.clone().unwrap_or_default()
         );
-        let response = reqwest::get(&url).await;
+        debug!("Getting following from {:?}", url);
+        let response = client.get(&url).send().await;
         if response.is_err() {
             let msg: String = response.unwrap_err().to_string();
             error!("Error getting following: {}", msg);
@@ -269,17 +285,24 @@ async fn get_following(
         }
         cursor = Some(cursor_value.unwrap().to_string());
     }
+
+    let end = chrono::Utc::now();
+    let duration = end - start;
+    debug!("Got following for {:?} in {:?}", did, duration);
+
     Ok(following)
 }
 
 async fn load_bluesky_post(
     uri: &str,
+    client: Option<reqwest::Client>,
 ) -> Result<JetstreamPost, Box<dyn std::error::Error + Send + Sync>> {
     let url = format!(
         "https://public.api.bsky.app/xrpc/app.bsky.feed.getPosts?uris={}",
         uri
     );
-    let response = reqwest::get(&url).await;
+    let client = client.unwrap_or_else(|| reqwest::Client::new());
+    let response = client.get(&url).send().await;
     if response.is_err() {
         let msg: String = response.unwrap_err().to_string();
         error!("Error getting post: {}", msg);
@@ -319,6 +342,7 @@ async fn check_possible_recipient(
     post_type: PostType,
     post: &JetstreamPost,
     retry: RetryPolicy,
+    client: Option<reqwest::Client>,
 ) -> (String, bool) {
     let user_settings = {
         let all_settings = user_settings.read().await;
@@ -357,12 +381,13 @@ async fn check_possible_recipient(
                     _ => return (possible_recipient, false),
                 };
                 let mut following = HashSet::new();
+                debug!("Checking if {:?} follows {:?}", possible_recipient, parent_poster_did);
                 for bluesky_account_did in user_settings.accounts.iter() {
                     let new_following = retry
                         .retry(|| {
                             timeout(
-                                Duration::from_secs(60 * 2),
-                                get_following(bluesky_account_did),
+                                Duration::from_secs(60),
+                                get_following(bluesky_account_did, client.clone()),
                             )
                         })
                         .await;
@@ -386,12 +411,14 @@ async fn check_possible_recipient(
 
 async fn process_post(
     post: JetstreamPost,
-    nats_message: Message,
+    nats_message: Option<Message>,
     user_settings: SharedUserSettings,
-    fcm_client: Arc<FcmClient>,
+    fcm_client: Option<Arc<FcmClient>>,
 ) {
     info!("Processing post: {:?}", post.post_id());
     let poster_did = post.did.clone();
+
+    let client = reqwest::Client::new();
 
     let post_type = match &post.commit.record {
         Record::Post(record) => {
@@ -439,6 +466,7 @@ async fn process_post(
             let post = post.clone();
             let possible_recipient = possible_recipient.clone();
             let retry = retry.clone();
+            let client = client.clone();
             task_group.spawn(async move {
                 check_possible_recipient(
                     possible_recipient,
@@ -447,6 +475,7 @@ async fn process_post(
                     post_type,
                     &post,
                     retry.clone(),
+                    Some(client.clone()),
                 )
                 .await
             });
@@ -464,20 +493,23 @@ async fn process_post(
 
     if fcm_recipients.is_empty() {
         info!("No interested listeners for this post");
-        let ack = nats_message.ack().await;
-        if ack.is_err() {
-            error!("Error acknowledging message: {:?}", ack);
-            return;
+        if nats_message.is_some() {
+            let ack = nats_message.unwrap().ack().await;
+            if ack.is_err() {
+                error!("Error acknowledging message: {:?}", ack);
+                return;
+            }
         }
         return;
     }
     info!("Interested listeners found: {:?}", fcm_recipients);
 
+
     let user_name = retry
         .retry(|| {
             timeout(
                 Duration::from_secs(60 * 1),
-                get_bluesky_display_name_and_handle(&poster_did),
+                get_bluesky_display_name_and_handle(&poster_did, Some(client.clone())),
             )
         })
         .await
@@ -500,7 +532,7 @@ async fn process_post(
                         .retry(|| {
                             timeout(
                                 Duration::from_secs(60 * 1),
-                                load_bluesky_post(&record.subject.uri),
+                                load_bluesky_post(&record.subject.uri, Some(client.clone())),
                             )
                         })
                         .await
@@ -538,7 +570,7 @@ async fn process_post(
                         .retry(|| {
                             timeout(
                                 Duration::from_secs(60 * 1),
-                                get_bluesky_display_name_and_handle(&source_did),
+                                get_bluesky_display_name_and_handle(&source_did, Some(client.clone())),
                             )
                         })
                         .await
@@ -591,7 +623,7 @@ async fn process_post(
         .retry(|| {
             timeout(
                 Duration::from_secs(60 * 1),
-                get_bluesky_display_name_and_handle(&source_post.did),
+                get_bluesky_display_name_and_handle(&source_post.did, Some(client.clone())),
             )
         })
         .await
@@ -603,10 +635,12 @@ async fn process_post(
 
     let url = bluesky_browseable_url(&post_owner_handle, &rkey);
 
-    let ack = nats_message.ack().await;
-    if ack.is_err() {
-        error!("Error acknowledging message: {:?}", ack);
-        return;
+    if nats_message.is_some() {
+        let ack = nats_message.unwrap().ack().await;
+        if ack.is_err() {
+            error!("Error acknowledging message: {:?}", ack);
+            return;
+        }
     }
     NOTIFICATIONS_SENT_COUNTER.inc_by(fcm_recipients.len() as u64);
 
@@ -627,7 +661,7 @@ async fn process_post(
 }
 
 async fn send_notification(
-    fcm_client: Arc<FcmClient>,
+    fcm_client: Option<Arc<FcmClient>>,
     fcm_recipients: HashSet<String>,
     title: String,
     body: String,
@@ -641,10 +675,11 @@ async fn send_notification(
         .unwrap_or("false".to_string())
         .to_ascii_lowercase()
         == "true";
-    if mock {
+    if mock || fcm_client.is_none() {
         warn!("Mock mode, will not send notification!");
         return;
     }
+    let fcm_client = fcm_client.unwrap();
     let mut message = serde_json::json!({
         "validate_only": false,
         "message": {
@@ -739,7 +774,7 @@ async fn listen_to_posts(
                     let result =
                         timeout(
                             Duration::from_secs(60 * 5),
-                            process_post(post, message, user_settings, fcm_client).instrument(
+                            process_post(post, Some(message), user_settings, Some(fcm_client)).instrument(
                                 span!(Level::INFO, "process", post_id = post_id.as_str()),
                             ),
                         )
@@ -899,20 +934,20 @@ mod tests {
     #[tokio::test]
     async fn test_username() {
         let did = "did:plc:jpkjnmydclkafjyicv3s6hcx";
-        let handle = get_bluesky_display_name_and_handle(did).await;
+        let handle = get_bluesky_display_name_and_handle(did, None).await;
         assert_eq!(handle.unwrap().1, "austinwitherspoon.com");
     }
     #[tokio::test]
     async fn test_follows() {
         let did = "did:plc:jpkjnmydclkafjyicv3s6hcx";
-        let follows = get_following(did).await;
+        let follows = get_following(did, None).await;
         println!("{:?}", follows);
         assert!(follows.unwrap().len() > 60);
     }
     #[tokio::test]
     async fn test_get_post() {
         let uri = "at://did:plc:jpkjnmydclkafjyicv3s6hcx/app.bsky.feed.post/3lhl4k52fek22";
-        let post = load_bluesky_post(uri).await;
+        let post = load_bluesky_post(uri, None).await;
         println!("{:?}", post);
         assert!(post.is_ok());
     }
@@ -938,5 +973,55 @@ mod tests {
             let post: JetstreamPost = JetstreamPost::parse_raw_json(input).unwrap();
             println!("{:?}\n\n", post);
         }
+    }
+
+    #[test]
+    fn test_popular_user() {
+        _ = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on( async {
+
+        std::env::set_var("RUST_LOG", "info,notifier=debug");
+
+        tracing_subscriber::fmt::init();
+
+        let start_time = chrono::Utc::now();
+
+        let mut nats_host = std::env::var("NATS_HOST").unwrap_or("localhost".to_string());
+        if !nats_host.contains(':') {
+            nats_host.push_str(":4222");
+        }
+
+        info!("Connecting to NATS at {}", nats_host);
+        let nats_client = async_nats::connect(nats_host).await.unwrap();
+        let nats_js = async_nats::jetstream::new(nats_client);
+
+        _ = nats_js
+            .create_key_value(async_nats::jetstream::kv::Config {
+                bucket: "bluenotify_kv_store".to_string(),
+                history: 1,
+                ..Default::default()
+            })
+            .await;
+        let kv_store = nats_js.get_key_value("bluenotify_kv_store").await.unwrap();
+        let user_settings: SharedUserSettings =
+            Arc::new(RwLock::new(AllUserSettings::new(HashMap::new())));
+
+        initial_load_user_settings(&kv_store, user_settings.clone()).await;
+
+        let shared_settings = user_settings.clone();
+
+        
+        let post = JetstreamPost { did: "did:plc:kqbyr4gqt6p2l57htlsa4nha".to_string(), time_us: 1739837485310201, commit: Commit { rkey: "3lifxxkth7c2q".to_string(), record: Record::Post(PostRecord { record_type: "app.bsky.feed.post".to_string(), created_at: "2025-02-18T00:11:21.451Z".to_string(), text: "Last one…on the stairs outside my office. Must have somehow landed on my body and then fallen off while I was walking inside.".to_string(), embed: Some(Embed { embed_type: "app.bsky.embed.images".to_string(), record: None, media: None }), reply: Some(ReplyData { parent: RecordReference { cid: "bafyreicbdrk75lsf423vlyxvc6vup4egs2rohhfvy4j3dghm7lwt4rmi4y".to_string(), uri: "at://did:plc:kqbyr4gqt6p2l57htlsa4nha/app.bsky.feed.post/3lifmahwils2g".to_string() } }) }) } };
+
+        process_post(post, None, shared_settings, None).await;
+
+        let end_time = chrono::Utc::now();
+        let duration = end_time - start_time;
+        println!("Duration: {:?}", duration);
+
+        });
     }
 }
