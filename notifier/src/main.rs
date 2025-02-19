@@ -21,9 +21,13 @@ use tokio::sync::RwLock;
 use tokio::task::JoinSet;
 use tokio::time::timeout;
 use tracing::{debug, error, info, span, warn, Instrument, Level};
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::Layer;
 use user_settings::{AllUserSettings, UserSettingsMap};
 mod fcm;
 use crate::fcm::FcmClient;
+use url::Url;
 
 const OLDEST_POST_AGE: chrono::Duration = chrono::Duration::hours(2);
 lazy_static! {
@@ -203,7 +207,10 @@ async fn get_bluesky_display_name_and_handle(
     let cache_key = format!("display_name.{}", did.replace(":", "_"));
 
     if let Some(cache) = cache.clone() {
-        debug!("Checking cache for handle for {:?}: Key: {:?}", did, cache_key);
+        debug!(
+            "Checking cache for handle for {:?}: Key: {:?}",
+            did, cache_key
+        );
         let cached = cache.get(&cache_key).await;
         if let Ok(cached) = cached {
             if let Some(cached) = cached {
@@ -213,7 +220,8 @@ async fn get_bluesky_display_name_and_handle(
                     error!("Error getting handle, corrupt cache: {}", msg);
                 } else {
                     debug!("Using cached handle for {:?}", did);
-                    let (display, handle): (String, String) = serde_json::from_str(&cached.unwrap()).unwrap();
+                    let (display, handle): (String, String) =
+                        serde_json::from_str(&cached.unwrap()).unwrap();
                     return Ok((display, handle));
                 }
             } else {
@@ -259,23 +267,26 @@ async fn get_bluesky_display_name_and_handle(
     let result = (display.to_string(), handle.to_string());
 
     if let Some(cache) = cache {
-        _ = cache.put(&cache_key, serde_json::to_string(&result).unwrap().into()).await;
+        _ = cache
+            .put(&cache_key, serde_json::to_string(&result).unwrap().into())
+            .await;
     }
 
     Ok(result)
 }
-
 
 async fn get_following(
     did: &str,
     client: Option<reqwest::Client>,
     cache: Option<Store>,
 ) -> Result<HashSet<String>, Box<dyn std::error::Error + Send + Sync>> {
-
     let cache_key = format!("following.{}", did.replace(":", "_"));
 
     if let Some(cache) = cache.clone() {
-        debug!("Checking cache for following for {:?}: Key: {:?}", did, cache_key);
+        debug!(
+            "Checking cache for following for {:?}: Key: {:?}",
+            did, cache_key
+        );
         let cached = cache.get(&cache_key).await;
         if let Ok(cached) = cached {
             if let Some(cached) = cached {
@@ -285,7 +296,8 @@ async fn get_following(
                     error!("Error getting following, corrupt cache: {}", msg);
                 } else {
                     debug!("Using cached following for {:?}", did);
-                    let following: HashSet<String> = serde_json::from_str(&cached.unwrap()).unwrap();
+                    let following: HashSet<String> =
+                        serde_json::from_str(&cached.unwrap()).unwrap();
                     return Ok(following);
                 }
             } else {
@@ -330,7 +342,6 @@ async fn get_following(
         return Ok(HashSet::new());
     }
 
-
     let mut cursor: Option<String> = None;
     let mut following = HashSet::new();
     loop {
@@ -368,7 +379,12 @@ async fn get_following(
     debug!("Got following for {:?} in {:?}", did, duration);
 
     if let Some(cache) = cache {
-        _ = cache.put(&cache_key, serde_json::to_string(&following).unwrap().into()).await;
+        _ = cache
+            .put(
+                &cache_key,
+                serde_json::to_string(&following).unwrap().into(),
+            )
+            .await;
     }
 
     Ok(following)
@@ -463,13 +479,20 @@ async fn check_possible_recipient(
                     _ => return (possible_recipient, false),
                 };
                 let mut following = HashSet::new();
-                debug!("Checking if {:?} follows {:?}", possible_recipient, parent_poster_did);
+                debug!(
+                    "Checking if {:?} follows {:?}",
+                    possible_recipient, parent_poster_did
+                );
                 for bluesky_account_did in user_settings.accounts.iter() {
                     let new_following = retry
                         .retry(|| {
                             timeout(
                                 Duration::from_secs(60),
-                                get_following(bluesky_account_did, client.clone(), Some(cache.clone())),
+                                get_following(
+                                    bluesky_account_did,
+                                    client.clone(),
+                                    Some(cache.clone()),
+                                ),
                             )
                         })
                         .await;
@@ -589,12 +612,15 @@ async fn process_post(
     }
     info!("Interested listeners found: {:?}", fcm_recipients);
 
-
     let user_name = retry
         .retry(|| {
             timeout(
                 Duration::from_secs(60 * 1),
-                get_bluesky_display_name_and_handle(&poster_did, Some(client.clone()), Some(cache.clone())),
+                get_bluesky_display_name_and_handle(
+                    &poster_did,
+                    Some(client.clone()),
+                    Some(cache.clone()),
+                ),
             )
         })
         .await
@@ -655,7 +681,11 @@ async fn process_post(
                         .retry(|| {
                             timeout(
                                 Duration::from_secs(60 * 1),
-                                get_bluesky_display_name_and_handle(&source_did, Some(client.clone()), Some(cache.clone())),
+                                get_bluesky_display_name_and_handle(
+                                    &source_did,
+                                    Some(client.clone()),
+                                    Some(cache.clone()),
+                                ),
                             )
                         })
                         .await
@@ -708,7 +738,11 @@ async fn process_post(
         .retry(|| {
             timeout(
                 Duration::from_secs(60 * 1),
-                get_bluesky_display_name_and_handle(&source_post.did, Some(client.clone()), Some(cache.clone())),
+                get_bluesky_display_name_and_handle(
+                    &source_post.did,
+                    Some(client.clone()),
+                    Some(cache.clone()),
+                ),
             )
         })
         .await
@@ -859,14 +893,12 @@ async fn listen_to_posts(
                 let cache = cache.clone();
                 debug!("Spawning process_post");
                 async move {
-                    let result =
-                        timeout(
-                            Duration::from_secs(60 * 5),
-                            process_post(post, Some(message), user_settings, Some(fcm_client), cache).instrument(
-                                span!(Level::INFO, "process", post_id = post_id.as_str()),
-                            ),
-                        )
-                        .await;
+                    let result = timeout(
+                        Duration::from_secs(60 * 5),
+                        process_post(post, Some(message), user_settings, Some(fcm_client), cache)
+                            .instrument(span!(Level::INFO, "process", post_id = post_id.as_str())),
+                    )
+                    .await;
                     if result.is_err() {
                         error!("Processing timed out after 5 minutes: {:?}", result);
                     }
@@ -937,7 +969,30 @@ async fn metrics() -> String {
 }
 
 async fn _main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    tracing_subscriber::fmt::init();
+    let loki_url = std::env::var("LOKI_URL");
+    if let Ok(loki_url) = loki_url {
+        let environment = std::env::var("ENVIRONMENT").unwrap_or("dev".to_string());
+        let (layer, task) = tracing_loki::builder()
+            .label("environment", environment)?
+            .label("service_name", "notifier")?
+            .extra_field("pid", format!("{}", std::process::id()))?
+            .build_url(Url::parse(&loki_url).unwrap())?;
+
+        tracing_subscriber::registry()
+            .with(layer.with_filter(tracing_subscriber::filter::EnvFilter::from_default_env()))
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .with_writer(std::io::stdout)
+                    .with_filter(tracing_subscriber::filter::EnvFilter::from_default_env()),
+            )
+            .init();
+
+        tokio::spawn(task);
+        tracing::info!("Notifier starting, loki tracing enabled.");
+    } else {
+        error!("LOKI_URL not set, will not send logs to Loki");
+        tracing_subscriber::fmt::init();
+    }
 
     TOKIO_ALIVE_TASKS.set(0);
     RECEIVED_MESSAGES_COUNTER.reset();

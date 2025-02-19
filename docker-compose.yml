@@ -61,6 +61,8 @@ services:
       - RUST_LOG=info,notifier:debug
       - RUST_BACKTRACE=1
       - SENTRY_DSN=${SENTRY_DSN}
+      - LOKI_URL=${LOKI_URL}
+      - ENVIRONMENT=${ENVIRONMENT}
     volumes:
       - ./cert.json:/usr/src/app/cert.json
     restart: unless-stopped
