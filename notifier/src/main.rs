@@ -301,6 +301,36 @@ async fn get_following(
     let start = chrono::Utc::now();
     let client = client.unwrap_or_else(|| reqwest::Client::new());
 
+    // First check and make sure they have less than 10,000 following, otherwise ignore
+    // since this will choke the post in our system
+    let profile_url = format!(
+        "https://public.api.bsky.app/xrpc/app.bsky.actor.getProfile?actor={}",
+        did
+    );
+
+    let response = client.get(&profile_url).send().await;
+    if response.is_err() {
+        let msg: String = response.unwrap_err().to_string();
+        error!("Error getting profile: {}", msg);
+        return Err(msg.into());
+    }
+    let response = response.unwrap();
+    if !response.status().is_success() {
+        let msg: String = response.error_for_status().unwrap_err().to_string();
+        error!("Error getting profile: {}", msg);
+        return Err(msg.into());
+    }
+
+    let json: Result<Value, _> = response.json().await;
+    let mut following_count = 0;
+    if let Ok(json) = json {
+        following_count = json["followsCount"].as_u64().unwrap_or(0);
+    }
+    if following_count > 10_000 {
+        return Ok(HashSet::new());
+    }
+
+
     let mut cursor: Option<String> = None;
     let mut following = HashSet::new();
     loop {
@@ -1014,6 +1044,12 @@ mod tests {
         let follows = get_following(did, None, None).await;
         println!("{:?}", follows);
         assert!(follows.unwrap().len() > 60);
+
+        // Test somebody with way too many following, ignore
+        let did = "did:plc:w3xevyycvef7y4tqsojptrf5";
+        let follows = get_following(did, None, None).await;
+        println!("{:?}", follows);
+        assert!(follows.unwrap().len() == 0);
     }
     #[tokio::test]
     async fn test_get_post() {
