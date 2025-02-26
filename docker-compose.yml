@@ -1,42 +1,74 @@
 version: '3.8'
 
 services:
-  notifier:
+  nats:
+    image: nats:latest
+    ports:
+      - "4222:4222"
+      - "8222:8222"
+    volumes:
+      - ./nats.conf:/nats.conf
+    restart: always
+    command: ["-js", "--config", "/nats.conf"]
+
+  firestore_reader:
     build:
       context: .
-      dockerfile: notifier.Dockerfile
-    volumes:
-      - ./apps/notifier/src:/app/apps/notifier/src
-      - ./packages:/app/packages
-      - ./cert.json:/app/cert.json
-      - ./processed_posts.pickle:/app/processed_posts.pickle
-    ports:
-      - "8000:8000"
+      dockerfile: firestore_reader.Dockerfile
     environment:
-      - GOOGLE_APPLICATION_CREDENTIALS=/app/cert.json
-      - GOOGLE_CLOUD_PROJECT=${GOOGLE_CLOUD_PROJECT}
-      - MOCK=True
+      - NATS_HOST=nats://nats:4222
+      - BIND_FIRESTORE_READER=0.0.0.0:8000
       - SETTINGS_COLLECTION=${SETTINGS_COLLECTION}
+      - GOOGLE_APPLICATION_CREDENTIALS=./cert.json
+      - GOOGLE_CLOUD_PROJECT=${GOOGLE_CLOUD_PROJECT}
+      - RUST_LOG=info
+      - RUST_BACKTRACE=1
       - SENTRY_DSN=${SENTRY_DSN}
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/"]
-      interval: 5s
-      timeout: 5s
-      retries: 3
+    volumes:
+      - ./cert.json:/usr/src/app/cert.json
+    restart: unless-stopped
+    ports:
+      - "8001:8000"
+    depends_on:
+      - nats
 
   jetstream_reader:
     build:
       context: .
       dockerfile: jetstream_reader.Dockerfile
-    volumes:
-      - ./apps/jetstream-reader/src:/app/apps/jetstream-reader/src
-      - ./packages:/app/packages
     environment:
-      - NOTIFIER_SERVER=http://notifier:8000
+      - NATS_HOST=nats://nats:4222
+      - BIND_JETSTREAM_READER=0.0.0.0:8000
+      - RUST_LOG=info
+      - RUST_BACKTRACE=1
       - SENTRY_DSN=${SENTRY_DSN}
+    restart: unless-stopped
     ports:
-      - "9000:9000"
+      - "8002:8000"
     depends_on:
-      notifier:
-        condition: service_healthy
-        
+      - nats
+      - firestore_reader
+
+  notifier:
+    build:
+      context: .
+      dockerfile: notifier.Dockerfile
+    environment:
+      - NATS_HOST=nats://nats:4222
+      - BIND_NOTIFIER=0.0.0.0:8000
+      - GOOGLE_APPLICATION_CREDENTIALS=./cert.json
+      - MOCK=${MOCK}
+      - RUST_LOG=info,notifier:debug
+      - RUST_BACKTRACE=1
+      - SENTRY_DSN=${SENTRY_DSN}
+      - LOKI_URL=${LOKI_URL}
+      - ENVIRONMENT=${ENVIRONMENT}
+    volumes:
+      - ./cert.json:/usr/src/app/cert.json
+    restart: unless-stopped
+    ports:
+      - "8003:8000"
+    depends_on:
+      - nats
+      - firestore_reader
+      - jetstream_reader

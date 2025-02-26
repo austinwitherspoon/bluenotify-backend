@@ -1,1 +1,0 @@
-Type hints and models for our notification system.

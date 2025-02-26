@@ -2,26 +2,22 @@ FROM rust:1-bookworm as builder
 
 WORKDIR /app
 
-RUN USER=root cargo new --bin notifier
-RUN USER=root cargo new --bin bluesky_utils
+RUN USER=root cargo new --bin firestore_reader
 RUN USER=root cargo new --bin user_settings
 
-WORKDIR /app/notifier
+WORKDIR /app/firestore_reader
 
-COPY ./notifier/Cargo.toml /app/notifier/Cargo.toml
-COPY ./bluesky_utils/Cargo.toml /app/bluesky_utils/Cargo.toml
+COPY ./firestore_reader/Cargo.toml /app/firestore_reader/Cargo.toml
 COPY ./user_settings/Cargo.toml /app/user_settings/Cargo.toml
 
 RUN cargo build --release
-RUN rm /app/notifier/src/*.rs
-RUN rm /app/bluesky_utils/src/*.rs
+RUN rm /app/firestore_reader/src/*.rs
 RUN rm /app/user_settings/src/*.rs
 
-ADD ./notifier/. /app/notifier
-ADD ./bluesky_utils/. /app/bluesky_utils
+ADD ./firestore_reader/. /app/firestore_reader
 ADD ./user_settings/. /app/user_settings
 
-RUN rm /app/notifier/target/release/deps/notifier*
+RUN rm /app/firestore_reader/target/release/deps/firestore_reader*
 
 RUN cargo build --release
 
@@ -42,11 +38,11 @@ RUN groupadd $APP_USER \
     && useradd -g $APP_USER $APP_USER \
     && mkdir -p ${APP}
 
-COPY --from=builder /app/notifier/target/release/notifier ${APP}/notifier
+COPY --from=builder /app/firestore_reader/target/release/firestore_reader ${APP}/firestore_reader
 
 RUN chown -R $APP_USER:$APP_USER ${APP}
 
 USER $APP_USER
 WORKDIR ${APP}
 
-CMD ["./notifier"]
+CMD ["./firestore_reader"]

@@ -1,0 +1,9 @@
+[workspace]
+
+members = [
+    "jetstream_reader",
+    "notifier",
+    "firestore_reader",
+    "user_settings",
+    "bluesky_utils",
+]
