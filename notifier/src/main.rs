@@ -808,7 +808,12 @@ async fn send_notification(
                 "body": body
             },
             "data": {
-                "url": url
+                "url": url,
+                "type": "post",
+                "text": body,
+                "post_user_did": "n/a",
+                "post_user_handle": "n/a",
+                "post_id": "n/a",
             },
             "android": {
                 "priority": "high"
