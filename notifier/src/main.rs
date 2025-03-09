@@ -816,7 +816,10 @@ async fn send_notification(
                 "post_id": "n/a",
             },
             "android": {
-                "priority": "high"
+                "priority": "high",
+                "notification": {
+                    "proxy": "DENY",
+                }
             },
             "apns": {
                 "payload": {
