@@ -405,13 +405,13 @@ async fn load_bluesky_post(
         error!("Error getting post: {}", msg);
         return Err(msg.into());
     }
-    let response = response.unwrap();
+    let response = response?;
     if !response.status().is_success() {
         let msg: String = response.error_for_status().unwrap_err().to_string();
         error!("Error getting post: {}", msg);
         return Err(msg.into());
     }
-    let raw_json_response: Value = response.json().await.unwrap();
+    let raw_json_response: Value = response.json().await?;
     let record: Result<PostRecord, _> =
         serde_json::from_value(raw_json_response["posts"][0]["record"].clone());
     if record.is_err() {
@@ -430,6 +430,41 @@ async fn load_bluesky_post(
     };
 
     Ok(post)
+}
+
+async fn load_post_image(
+    uri: &str,
+    client: Option<reqwest::Client>,
+) -> Result<Option<String>, Box<dyn std::error::Error + Send + Sync>> {
+    let url = format!(
+        "https://public.api.bsky.app/xrpc/app.bsky.feed.getPosts?uris={}",
+        uri
+    );
+    let client = client.unwrap_or_else(|| reqwest::Client::new());
+    let response = client.get(&url).send().await;
+    if response.is_err() {
+        let msg: String = response.unwrap_err().to_string();
+        error!("Error getting post: {}", msg);
+        return Err(msg.into());
+    }
+    let response = response?;
+    if !response.status().is_success() {
+        let msg: String = response.error_for_status().unwrap_err().to_string();
+        error!("Error getting post: {}", msg);
+        return Err(msg.into());
+    }
+    let raw_json_response: Value = response.json().await?;
+    
+    let image = raw_json_response["posts"][0]["embed"]["images"][0]["thumb"].as_str();
+    if let Some(image) = image {
+        return Ok(Some(image.to_string()));
+    }
+    let image = raw_json_response["posts"][0]["embed"]["media"]["images"][0]["thumb"].as_str();
+    if let Some(image) = image {
+        return Ok(Some(image.to_string()));
+    }
+    Ok(None)
+
 }
 
 async fn check_possible_recipient(
@@ -706,6 +741,21 @@ async fn process_post(
 
     let mut notification_body = source_post_record.text.clone();
 
+    let mut image: Option<String> = {
+        info!("Loading post image..");
+        let post_uri = format!("at://{}/app.bsky.feed.post/{}", source_post.did, source_post.commit.rkey);
+        retry
+            .retry(|| {
+                timeout(
+                    Duration::from_secs(20),
+                    load_post_image(&post_uri, None),
+                )
+            })
+            .await
+            .unwrap_or(Ok(None))
+            .unwrap_or(None)
+    };
+
     if notification_body.is_empty() && source_post_record.embed.is_some() {
         let mut media_type = source_post_record
             .embed
@@ -726,7 +776,9 @@ async fn process_post(
                 .clone();
         }
         if media_type.contains("image") {
-            notification_body = "[image]".to_string();
+            if image.is_none() {
+                notification_body = "[image]".to_string();
+            }
         } else if media_type.contains("video") {
             notification_body = "[video]".to_string();
         } else if media_type.contains("external") {
@@ -775,6 +827,7 @@ async fn process_post(
         fcm_recipients,
         notification_title,
         notification_body,
+        image,
         url,
     )
     .await;
@@ -785,6 +838,7 @@ async fn send_notification(
     fcm_recipients: HashSet<String>,
     title: String,
     body: String,
+    image: Option<String>,
     url: String,
 ) {
     info!("Sending notification to {} users", fcm_recipients.len());
@@ -834,6 +888,9 @@ async fn send_notification(
             }
         }
     });
+    if let Some(image) = image {
+        message["message"]["notification"]["image"] = Value::String(image);
+    }
     for fcm_token in fcm_recipients {
         message["message"]["token"] = Value::String(fcm_token);
         let response = fcm_client.send(message.clone()).await;
@@ -1120,6 +1177,24 @@ mod tests {
         let post = load_bluesky_post(uri, None).await;
         println!("{:?}", post);
         assert!(post.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_get_image() {
+        let uri = "at://did:plc:vhwscbpufmtoekc5hyz73vpa/app.bsky.feed.post/3lcowibggzk2n";
+        let post = load_post_image(uri, None).await.unwrap().unwrap();
+        println!("{:?}", post);
+        assert!(post.contains("https://cdn.bsky.app/img/feed_thumbnail/plain/"));
+        
+        let uri = "at://did:plc:vhwscbpufmtoekc5hyz73vpa/app.bsky.feed.post/3lcowy446uk27";
+        let post = load_post_image(uri, None).await.unwrap().unwrap();
+        println!("{:?}", post);
+        assert!(post.contains("https://cdn.bsky.app/img/feed_thumbnail/plain/"));
+        
+        let uri = "at://did:plc:vhwscbpufmtoekc5hyz73vpa/app.bsky.feed.post/3lkrr752sxc26";
+        let post = load_post_image(uri, None).await.unwrap().unwrap();
+        println!("{:?}", post);
+        assert!(post.contains("https://cdn.bsky.app/img/feed_thumbnail/plain/"));
     }
 
     #[test]
