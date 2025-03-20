@@ -64,6 +64,7 @@ struct JetstreamPost {
     did: String,
     time_us: u64, // microseconds timestamp
     commit: Commit,
+    raw_json: Value,
 }
 
 impl JetstreamPost {
@@ -126,7 +127,12 @@ impl JetstreamPost {
             did,
             time_us,
             commit: Commit { rkey, record },
+            raw_json: json,
         })
+    }
+
+    fn get_embed_headline(&self) -> Option<String> {
+        return self.raw_json["commit"]["record"]["embed"]["external"]["title"].as_str().map(|s| s.to_string());
     }
 }
 
@@ -421,12 +427,20 @@ async fn load_bluesky_post(
     let (did, rkey) = parse_uri(uri).unwrap_or(("None".to_string(), "None".to_string()));
 
     let post = JetstreamPost {
-        did,
+        did: did.clone(),
         time_us: 0,
         commit: Commit {
-            rkey,
+            rkey: rkey.clone(),
             record: Record::Post(record.unwrap()),
         },
+        raw_json: serde_json::json!({
+            "did": did,
+            "time_us": 0,
+            "commit": {
+                "rkey": rkey,
+                "record": raw_json_response["posts"][0]["record"].clone()
+            }
+        })
     };
 
     Ok(post)
@@ -741,7 +755,7 @@ async fn process_post(
 
     let mut notification_body = source_post_record.text.clone();
 
-    let mut image: Option<String> = {
+    let image: Option<String> = {
         info!("Loading post image..");
         let post_uri = format!("at://{}/app.bsky.feed.post/{}", source_post.did, source_post.commit.rkey);
         retry
@@ -755,6 +769,20 @@ async fn process_post(
             .unwrap_or(Ok(None))
             .unwrap_or(None)
     };
+
+    let has_external_link = source_post_record.embed.as_ref().map_or(false, |embed| {
+        embed.embed_type.contains("external")
+    });
+    if has_external_link {
+        if let Some(headline) = source_post.get_embed_headline() {
+            let headline_text = format!("Link: {}", headline);
+            if notification_body.is_empty() {
+                notification_body = headline_text;
+            } else {
+                notification_body = format!("{}\n{}", notification_body, headline_text);
+            }
+        }
+    }
 
     if notification_body.is_empty() && source_post_record.embed.is_some() {
         let mut media_type = source_post_record
@@ -1211,6 +1239,7 @@ mod tests {
             r#"{"did":"did:plc:vhwscbpufmtoekc5hyz73vpa","time_us":1739074686768901,"kind":"commit","commit":{"rev":"3lhprkiymb72t","operation":"create","collection":"app.bsky.feed.post","rkey":"3lhprkidbgs27","record":{"$type":"app.bsky.feed.post","createdAt":"2025-02-09T04:18:05.931Z","embed":{"$type":"app.bsky.embed.images","images":[{"alt":"","aspectRatio":{"height":670,"width":739},"image":{"$type":"blob","ref":{"$link":"bafkreifyetr44wuxhi7gjzrcnvjpligg2awcvycml37tktvptfh6ylua4q"},"mimeType":"image/jpeg","size":392305}}]},"langs":["en"],"reply":{"parent":{"cid":"bafyreibbg2leljyfcurxfnscsozon7h7ta4hetheopctcejdsmpnfooy4q","uri":"at://did:plc:jpkjnmydclkafjyicv3s6hcx/app.bsky.feed.post/3lacsvjm7o62x"},"root":{"cid":"bafyreibbg2leljyfcurxfnscsozon7h7ta4hetheopctcejdsmpnfooy4q","uri":"at://did:plc:jpkjnmydclkafjyicv3s6hcx/app.bsky.feed.post/3lacsvjm7o62x"}},"text":""},"cid":"bafyreihlqnfjcmph2w3prstvc35lbrmte6yu4kd5b2war5s6qu6efxplq4"}}"#,
             r#"{"did":"did:plc:vhwscbpufmtoekc5hyz73vpa","time_us":1739075366266743,"kind":"commit","commit":{"rev":"3lhps6qxmsu2e","operation":"create","collection":"app.bsky.feed.post","rkey":"3lhps6qvn3k27","record":{"$type":"app.bsky.feed.post","createdAt":"2025-02-09T04:29:26.015Z","embed":{"$type":"app.bsky.embed.record","record":{"cid":"bafyreib72cfeelnufyrp6ok373i5mcdgypq3ye4qu625p5q6m6grlzioyu","uri":"at://did:plc:jpkjnmydclkafjyicv3s6hcx/app.bsky.feed.post/3lacy7ydylc22"}},"langs":["en"],"reply":{"parent":{"cid":"bafyreibbg2leljyfcurxfnscsozon7h7ta4hetheopctcejdsmpnfooy4q","uri":"at://did:plc:jpkjnmydclkafjyicv3s6hcx/app.bsky.feed.post/3lacsvjm7o62x"},"root":{"cid":"bafyreibbg2leljyfcurxfnscsozon7h7ta4hetheopctcejdsmpnfooy4q","uri":"at://did:plc:jpkjnmydclkafjyicv3s6hcx/app.bsky.feed.post/3lacsvjm7o62x"}},"text":""},"cid":"bafyreihbp6dtgxyg4q77tor3lyvgxy57c2s3zozuvbg3semjfr45hdbkji"}}"#,
             r#"{"did":"did:plc:vhwscbpufmtoekc5hyz73vpa","time_us":1739075494566375,"kind":"commit","commit":{"rev":"3lhpsckuobb2q","operation":"create","collection":"app.bsky.feed.post","rkey":"3lhpscjtnvs27","record":{"$type":"app.bsky.feed.post","createdAt":"2025-02-09T04:31:32.828Z","embed":{"$type":"app.bsky.embed.external","external":{"description":"ALT: a baby in a striped shirt is covering his face with his hand and says `` dear lort '' .","thumb":{"$type":"blob","ref":{"$link":"bafkreifl5e5bn4gxxnmwuhx6vuhjvppyyi6mg4vryrhtpxxdptkjvyzyx4"},"mimeType":"image/jpeg","size":403665},"title":"a baby in a striped shirt is covering his face with his hand and says `` dear lort '' .","uri":"https://media.tenor.com/rjjtn8dd0tgAAAAC/baby-facepalm.gif?hh=498&ww=498"}},"langs":["en"],"reply":{"parent":{"cid":"bafyreibbg2leljyfcurxfnscsozon7h7ta4hetheopctcejdsmpnfooy4q","uri":"at://did:plc:jpkjnmydclkafjyicv3s6hcx/app.bsky.feed.post/3lacsvjm7o62x"},"root":{"cid":"bafyreibbg2leljyfcurxfnscsozon7h7ta4hetheopctcejdsmpnfooy4q","uri":"at://did:plc:jpkjnmydclkafjyicv3s6hcx/app.bsky.feed.post/3lacsvjm7o62x"}},"text":""},"cid":"bafyreig4ckxykhrryffns2am7zbe7rzo4dxt6j427cucxy4ig4iczzrk4y"}}"#,
+            r#"{"did":"did:plc:vhwscbpufmtoekc5hyz73vpa","time_us":1742444562673094,"kind":"commit","commit":{"rev":"3lkrtymntgd2s","operation":"create","collection":"app.bsky.feed.post","rkey":"3lkrtyku3mc2e","record":{"$type":"app.bsky.feed.post","createdAt":"2025-03-20T04:22:40.190Z","embed":{"$type":"app.bsky.embed.external","external":{"description":"Russian and Chinese channels only the 'tip of the iceberg', boosted by 'an extensive covert network' of state-linked channels","thumb":{"$type":"blob","ref":{"$link":"bafkreihxojdpg3wlvz3blhkk7kp7mluyu6kshc6wgleaqam2j2np3zlvzu"},"mimeType":"image/jpeg","size":589090},"title":"Disinformation by hostile states a 'threat to democracies'","uri":"https://www.irishexaminer.com/news/arid-41596729.html?utm_source=dlvr.it\u0026utm_medium=bluesky"}},"langs":["en"],"text":""},"cid":"bafyreihmrr5e634igohte23imabmsvuqmo6ukpmtz4tlpchp2dl6rqxioi"}}"#,
         ];
 
         for input in inputs {
@@ -1218,5 +1247,22 @@ mod tests {
             let post: JetstreamPost = JetstreamPost::parse_raw_json(input).unwrap();
             println!("{:?}\n\n", post);
         }
+    }
+
+    #[tokio::test]
+    async fn test_get_embed_headline() {
+        let input = r#"{"did":"did:plc:vhwscbpufmtoekc5hyz73vpa","time_us":1742444562673094,"kind":"commit","commit":{"rev":"3lkrtymntgd2s","operation":"create","collection":"app.bsky.feed.post","rkey":"3lkrtyku3mc2e","record":{"$type":"app.bsky.feed.post","createdAt":"2025-03-20T04:22:40.190Z","embed":{"$type":"app.bsky.embed.external","external":{"description":"Russian and Chinese channels only the 'tip of the iceberg', boosted by 'an extensive covert network' of state-linked channels","thumb":{"$type":"blob","ref":{"$link":"bafkreihxojdpg3wlvz3blhkk7kp7mluyu6kshc6wgleaqam2j2np3zlvzu"},"mimeType":"image/jpeg","size":589090},"title":"Disinformation by hostile states a 'threat to democracies'","uri":"https://www.irishexaminer.com/news/arid-41596729.html?utm_source=dlvr.it\u0026utm_medium=bluesky"}},"langs":["en"],"text":""},"cid":"bafyreihmrr5e634igohte23imabmsvuqmo6ukpmtz4tlpchp2dl6rqxioi"}}"#;
+        println!("Json Input: {}", input);
+        let post: JetstreamPost = JetstreamPost::parse_raw_json(input).unwrap();
+        println!("{:?}\n\n", post);
+        let headline = post.get_embed_headline();
+        println!("Headline: {:?}", headline);
+        assert_eq!(headline, Some("Disinformation by hostile states a 'threat to democracies'".to_string()));
+
+        let post: JetstreamPost = load_bluesky_post("at://did:plc:annmh2aamt3ctc2gubsvi6dj/app.bsky.feed.post/3lkritvwbkg2t", None).await.unwrap();
+        println!("{:?}\n\n", post);
+        let headline = post.get_embed_headline();
+        println!("Headline: {:?}", headline);
+        assert_eq!(headline, Some("Disinformation by hostile states a 'threat to democracies'".to_string()));
     }
 }
