@@ -31,3 +31,4 @@ user_settings = { path = "../user_settings" }
 database_schema = { path = "../database_schema" }
 yup-oauth2 = "9.0.0"
 diesel-async = { version = "0.5.2", features = ["postgres", "deadpool"] }
+diesel_migrations = { version = "2.2.0", features = ["postgres"] }
