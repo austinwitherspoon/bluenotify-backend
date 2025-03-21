@@ -4,7 +4,6 @@ use async_nats::jetstream::stream::Stream;
 use async_nats::jetstream::Message;
 use axum::{routing::get, Router};
 use bluesky_utils::{bluesky_browseable_url, parse_created_at, parse_uri};
-use cached::proc_macro::cached;
 use futures::TryStreamExt;
 use lazy_static::lazy_static;
 use prometheus::{
@@ -28,6 +27,14 @@ use user_settings::{AllUserSettings, UserSettingsMap};
 mod fcm;
 use crate::fcm::FcmClient;
 use url::Url;
+use database_schema::notifications;
+
+use diesel::prelude::*;
+
+use diesel_async::{RunQueryDsl, AsyncPgConnection};
+
+use diesel_async::pooled_connection::AsyncDieselConnectionManager;
+use diesel_async::pooled_connection::deadpool::Pool;
 
 const OLDEST_POST_AGE: chrono::Duration = chrono::Duration::hours(2);
 lazy_static! {
@@ -203,6 +210,18 @@ struct Media {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 struct ReplyData {
     parent: RecordReference,
+}
+
+
+#[derive(Insertable)]
+#[diesel(table_name = notifications)]
+struct NewNotification {
+    user_id: String,
+    is_read: bool,
+    title: String,
+    body: String,
+    url: String,
+    image: Option<String>,
 }
 
 async fn get_bluesky_display_name_and_handle(
@@ -569,6 +588,7 @@ async fn process_post(
     user_settings: SharedUserSettings,
     fcm_client: Option<Arc<FcmClient>>,
     cache: Store,
+    pg: Option<Pool<AsyncPgConnection>>,
 ) {
     info!("Processing post: {:?}", post.post_id());
     let poster_did = post.did.clone();
@@ -857,6 +877,7 @@ async fn process_post(
         notification_body,
         image,
         url,
+        pg,
     )
     .await;
 }
@@ -868,6 +889,7 @@ async fn send_notification(
     body: String,
     image: Option<String>,
     url: String,
+    pg: Option<Pool<AsyncPgConnection>>,
 ) {
     info!("Sending notification to {} users", fcm_recipients.len());
     info!("Title: {}", title);
@@ -880,6 +902,33 @@ async fn send_notification(
     if mock || fcm_client.is_none() {
         warn!("Mock mode, will not send notification!");
         return;
+    }
+    if let Some(pg_pool) = pg {
+        let pool = pg_pool.get().await;
+        if pool.is_err() {
+            error!("Error getting pg connection!");
+        } else {
+            let mut new_notifications = Vec::new();
+            for fcm_token in &fcm_recipients {
+                new_notifications.push(NewNotification {
+                    user_id: fcm_token.clone(),
+                    is_read: false,
+                    title: title.clone(),
+                    body: body.clone(),
+                    url: url.clone(),
+                    image: image.clone(),
+                });
+            }
+
+            let mut con = pool.unwrap();
+            let res = diesel::insert_into(notifications::table)
+                .values(&new_notifications)
+                .execute(&mut con)
+                .await;
+            if res.is_err() {
+                error!("Error inserting notifications: {:?}", res);
+            }
+        }
     }
     let fcm_client = fcm_client.unwrap();
     let mut message = serde_json::json!({
@@ -933,6 +982,7 @@ async fn listen_to_posts(
     user_settings: SharedUserSettings,
     fcm_client: Arc<FcmClient>,
     cache: Store,
+    pg: Option<Pool<AsyncPgConnection>>,
 ) {
     let consumer = posts_stream
         .get_or_create_consumer(
@@ -984,11 +1034,12 @@ async fn listen_to_posts(
                 let user_settings = user_settings.clone();
                 let fcm_client = fcm_client.clone();
                 let cache = cache.clone();
+                let pg = pg.clone();
                 debug!("Spawning process_post");
                 async move {
                     let result = timeout(
                         Duration::from_secs(60 * 5),
-                        process_post(post, Some(message), user_settings, Some(fcm_client), cache)
+                        process_post(post, Some(message), user_settings, Some(fcm_client), cache, pg)
                             .instrument(span!(Level::INFO, "process", post_id = post_id.as_str())),
                     )
                     .await;
@@ -1053,6 +1104,7 @@ async fn listen_to_user_settings(kv_store: Store, current_settings: SharedUserSe
     }
 }
 
+
 async fn metrics() -> String {
     let mut buffer = vec![];
     let encoder = TextEncoder::new();
@@ -1091,6 +1143,13 @@ async fn _main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     RECEIVED_MESSAGES_COUNTER.reset();
     NOTIFICATIONS_SENT_COUNTER.reset();
 
+    info!("Getting DB");
+
+    let pg_config = AsyncDieselConnectionManager::<diesel_async::AsyncPgConnection>::new(std::env::var("DATABASE_URL").expect("DATABASE_URL must be set"));
+    let pg_pool = Pool::builder(pg_config).build()?;
+
+    info!("DB connected");
+    
     let mut nats_host = std::env::var("NATS_HOST").unwrap_or("localhost".to_string());
     if !nats_host.contains(':') {
         nats_host.push_str(":4222");
@@ -1146,7 +1205,7 @@ async fn _main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     });
     let shared_settings = user_settings.clone();
     tasks.spawn(async move {
-        listen_to_posts(posts_stream, shared_settings, fcm_client.clone(), cache).await;
+        listen_to_posts(posts_stream, shared_settings, fcm_client.clone(), cache, Some(pg_pool)).await;
     });
     let shared_settings = user_settings.clone();
     tasks.spawn(async move {
@@ -1169,11 +1228,15 @@ fn main() {
         ));
     }
 
-    _ = tokio::runtime::Builder::new_multi_thread()
+    let result = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .unwrap()
         .block_on(_main());
+
+    if let Err(e) = result {
+        eprintln!("Error: {:?}", e);
+    }
 }
 
 #[cfg(test)]
