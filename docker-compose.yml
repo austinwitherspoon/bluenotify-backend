@@ -86,3 +86,21 @@ services:
       - nats
       - firestore_reader
       - jetstream_reader
+
+  web_server:
+    build:
+      context: .
+      dockerfile: web_server.Dockerfile
+    environment:
+      - BIND_WEB=0.0.0.0:8000
+      - RUST_LOG=info,web_server:debug
+      - RUST_BACKTRACE=1
+      - SENTRY_DSN=${SENTRY_DSN}
+      - LOKI_URL=${LOKI_URL}
+      - ENVIRONMENT=${ENVIRONMENT}
+      - DATABASE_URL=postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres/${POSTGRES_DB}
+    restart: unless-stopped
+    ports:
+      - "8004:8000"
+    depends_on:
+      - notifier

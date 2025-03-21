@@ -1,14 +1,5 @@
-// @generated automatically by Diesel CLI.
+pub mod schema;
+pub mod models;
 
-diesel::table! {
-    notifications (id) {
-        id -> Int4,
-        user_id -> Text,
-        created_at -> Timestamp,
-        is_read -> Bool,
-        title -> Text,
-        body -> Text,
-        url -> Text,
-        image -> Nullable<Text>,
-    }
-}
+pub use models::*;
+pub use schema::*;

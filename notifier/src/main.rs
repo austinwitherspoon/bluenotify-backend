@@ -27,7 +27,7 @@ use user_settings::{AllUserSettings, UserSettingsMap};
 mod fcm;
 use crate::fcm::FcmClient;
 use url::Url;
-use database_schema::notifications;
+use database_schema::{notifications, NewNotification};
 
 use diesel::prelude::*;
 
@@ -216,17 +216,6 @@ struct ReplyData {
     parent: RecordReference,
 }
 
-
-#[derive(Insertable)]
-#[diesel(table_name = notifications)]
-struct NewNotification {
-    user_id: String,
-    is_read: bool,
-    title: String,
-    body: String,
-    url: String,
-    image: Option<String>,
-}
 
 async fn get_bluesky_display_name_and_handle(
     did: &str,
