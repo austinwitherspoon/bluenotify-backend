@@ -1,18 +1,12 @@
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use axum::routing::{delete, post};
-use axum::{routing::get, Router};
+use axum::routing::{delete, post, get, Router};
 use axum_prometheus::PrometheusMetricLayer;
 use database_schema::{notifications, Notification};
 use diesel::prelude::*;
 use diesel_async::pooled_connection::deadpool::Pool;
 use diesel_async::pooled_connection::AsyncDieselConnectionManager;
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
-use lazy_static::lazy_static;
-use prometheus::{
-    self, register_histogram, register_int_counter, register_int_gauge, Encoder, Histogram,
-    IntCounter, IntGauge, TextEncoder,
-};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -84,6 +78,27 @@ async fn clear_notifications(
     Ok("Success".to_string())
 }
 
+async fn delete_notification(
+    State(pool): State<Pool<AsyncPgConnection>>,
+    Path((user_id, notification_id)): Path<(String, i32)>,
+) -> Result<String, StatusCode> {
+    info!(
+        "deleting notification {} for user: {}",
+        notification_id, user_id
+    );
+    let mut conn = pool
+        .get()
+        .await
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+
+    diesel::delete(notifications::dsl::notifications.find(notification_id))
+        .execute(&mut conn)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok("Success".to_string())
+}
+
 async fn _main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let loki_url = std::env::var("LOKI_URL");
     if let Ok(loki_url) = loki_url {
@@ -128,7 +143,6 @@ async fn _main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // a separate background task to clean up
     std::thread::spawn(move || loop {
         std::thread::sleep(cleanup_interval);
-        tracing::info!("rate limiting storage size: {}", governor_limiter.len());
         governor_limiter.retain_recent();
     });
     let axum_url = std::env::var("BIND_WEB").unwrap_or("0.0.0.0:8004".to_string());
@@ -146,6 +160,10 @@ async fn _main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .route(
             "/notifications/{user_id}/clear",
             delete(clear_notifications),
+        )
+        .route(
+            "/notifications/{user_id}/{notification_id}",
+            delete(delete_notification),
         )
         .with_state(pg_pool)
         .layer(GovernorLayer {

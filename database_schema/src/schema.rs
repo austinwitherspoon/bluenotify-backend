@@ -5,7 +5,6 @@ diesel::table! {
         id -> Int4,
         user_id -> Text,
         created_at -> Timestamp,
-        is_read -> Bool,
         title -> Text,
         body -> Text,
         url -> Text,

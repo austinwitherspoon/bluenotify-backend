@@ -1,5 +1,6 @@
 use diesel::prelude::*;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
+use crate::timestamp::SerializableTimestamp;
 
 #[derive(Queryable, Selectable, Serialize)]
 #[diesel(table_name = crate::schema::notifications)]
@@ -7,6 +8,7 @@ use serde::{Deserialize, Serialize};
 pub struct Notification {
     pub id: i32,
     pub user_id: String,
+    pub created_at: SerializableTimestamp,
     pub is_read: bool,
     pub title: String,
     pub body: String,
