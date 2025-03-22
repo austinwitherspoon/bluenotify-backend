@@ -905,7 +905,6 @@ async fn send_notification(
             for fcm_token in &fcm_recipients {
                 new_notifications.push(NewNotification {
                     user_id: fcm_token.clone(),
-                    is_read: false,
                     title: title.clone(),
                     body: body.clone(),
                     url: url.clone(),

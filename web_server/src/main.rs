@@ -36,28 +36,9 @@ async fn get_notifications(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
+    info!("Found {} notifications for user: {}", results.len(), user_id);
+
     Ok(serde_json::to_string(&results).unwrap())
-}
-
-async fn read_notification(
-    State(pool): State<Pool<AsyncPgConnection>>,
-    Path((user_id, notification_id)): Path<(String, i32)>,
-) -> Result<String, StatusCode> {
-    info!(
-        "marking notification {} as read for user: {}",
-        notification_id, user_id
-    );
-    let mut conn = pool
-        .get()
-        .await
-        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
-
-    diesel::update(notifications::dsl::notifications.find(notification_id))
-        .set(notifications::is_read.eq(true))
-        .execute(&mut conn)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    Ok("Success".to_string())
 }
 
 async fn clear_notifications(
@@ -153,10 +134,6 @@ async fn _main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .route("/", get(|| async { "Web server online." }))
         .route("/metrics", get(|| async move { metric_handle.render() }))
         .route("/notifications/{user_id}", get(get_notifications))
-        .route(
-            "/notifications/{user_id}/{notification_id}/read",
-            post(read_notification),
-        )
         .route(
             "/notifications/{user_id}/clear",
             delete(clear_notifications),
