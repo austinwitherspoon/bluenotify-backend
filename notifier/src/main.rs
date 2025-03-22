@@ -474,13 +474,13 @@ async fn load_post_image(
     let response = client.get(&url).send().await;
     if response.is_err() {
         let msg: String = response.unwrap_err().to_string();
-        error!("Error getting post: {}", msg);
+        warn!("Error getting post: {}", msg);
         return Err(msg.into());
     }
     let response = response?;
     if !response.status().is_success() {
         let msg: String = response.error_for_status().unwrap_err().to_string();
-        error!("Error getting post: {}", msg);
+        warn!("Error getting post: {}", msg);
         return Err(msg.into());
     }
     let raw_json_response: Value = response.json().await?;
@@ -1027,7 +1027,7 @@ async fn send_notification(
         message["message"]["token"] = Value::String(fcm_token);
         let response = fcm_client.send(message.clone()).await;
         if response.is_err() {
-            error!("Error sending notification: {:?}", response);
+            warn!("Error sending notification: {:?}", response);
         }
     }
 }
@@ -1060,7 +1060,7 @@ async fn listen_to_posts(
             let json_string = String::from_utf8_lossy(message.payload.as_ref());
             let post: Result<JetstreamPost, _> = JetstreamPost::parse_raw_json(&json_string);
             if post.is_err() {
-                error!(
+                warn!(
                     "Failed to deserialize post: {:?}\nData: {}",
                     post, json_string
                 );
@@ -1073,7 +1073,7 @@ async fn listen_to_posts(
             let post = post.unwrap();
             let post_datetime = post.post_datetime();
             if post_datetime.is_none() {
-                error!("Error parsing post datetime");
+                warn!("Error parsing post datetime");
                 _ = message.ack().await;
                 continue;
             }
@@ -1195,13 +1195,17 @@ async fn _main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     .with_writer(std::io::stdout)
                     .with_filter(tracing_subscriber::filter::EnvFilter::from_default_env()),
             )
+            .with(sentry_tracing::layer())
             .init();
 
         tokio::spawn(task);
         tracing::info!("Notifier starting, loki tracing enabled.");
     } else {
-        error!("LOKI_URL not set, will not send logs to Loki");
-        tracing_subscriber::fmt::init();
+        warn!("LOKI_URL not set, will not send logs to Loki");
+        tracing_subscriber::registry()
+            .with(tracing_subscriber::fmt::layer())
+            .with(sentry_tracing::layer())
+            .init();
     }
 
     TOKIO_ALIVE_TASKS.set(0);
@@ -1306,16 +1310,25 @@ fn main() {
                 ..Default::default()
             },
         ));
-    }
+        let result = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(_main());
 
-    let result = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .unwrap()
-        .block_on(_main());
+        if let Err(e) = result {
+            eprintln!("Error: {:?}", e);
+        }
+    } else {
+        let result = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(_main());
 
-    if let Err(e) = result {
-        eprintln!("Error: {:?}", e);
+        if let Err(e) = result {
+            eprintln!("Error: {:?}", e);
+        }
     }
 }
 
