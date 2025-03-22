@@ -24,6 +24,7 @@ ADD ./notifier/. /app/notifier
 ADD ./bluesky_utils/. /app/bluesky_utils
 ADD ./database_schema/. /app/database_schema
 ADD ./user_settings/. /app/user_settings
+ADD ./migrations/. /app/migrations
 
 RUN rm /app/notifier/target/release/deps/notifier*
 
