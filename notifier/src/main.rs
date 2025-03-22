@@ -40,6 +40,9 @@ use diesel_migrations::{embed_migrations, EmbeddedMigrations, MigrationHarness};
 
 pub const MIGRATIONS: EmbeddedMigrations = embed_migrations!("../migrations");
 
+const MAX_NOTIFICATION_AGE: i64 = 30;
+const MAX_USER_NOTIFICATIONS: usize = 100;
+
 const OLDEST_POST_AGE: chrono::Duration = chrono::Duration::hours(2);
 lazy_static! {
     static ref RECEIVED_MESSAGES_COUNTER: IntCounter = register_int_counter!(
@@ -919,6 +922,36 @@ async fn send_notification(
                 .await;
             if res.is_err() {
                 error!("Error inserting notifications: {:?}", res);
+            }
+            // remove notifications older than 30 days
+            let res = diesel::delete(notifications::table.filter(
+                notifications::dsl::created_at.lt(chrono::Utc::now().naive_utc() - chrono::Duration::days(MAX_NOTIFICATION_AGE))
+            )).execute(&mut con).await;
+            if res.is_err() {
+                error!("Error deleting old notifications: {:?}", res);
+            }
+            // remove old notifications if we have more than 100
+            for fcm_token in &fcm_recipients {
+                let ids = notifications::table
+                    .filter(notifications::dsl::user_id.eq(fcm_token))
+                    .select(notifications::dsl::id)
+                    .order(notifications::dsl::created_at.desc())
+                    .offset(MAX_USER_NOTIFICATIONS as i64)
+                    .load::<i32>(&mut con)
+                    .await;
+                if ids.is_err() {
+                    error!("Error getting old notifications: {:?}", ids);
+                } else {
+                    let ids = ids.unwrap();
+                    if !ids.is_empty() {
+                        let res = diesel::delete(notifications::table.filter(
+                            notifications::dsl::id.eq_any(ids)
+                        )).execute(&mut con).await;
+                        if res.is_err() {
+                            error!("Error deleting old notifications: {:?}", res);
+                        }
+                    }
+                }
             }
         }
     }
