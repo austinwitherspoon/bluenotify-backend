@@ -20,3 +20,5 @@ cert.json
 .env
 
 target/
+
+postgres_data/

@@ -11,6 +11,19 @@ services:
     restart: always
     command: ["-js", "--config", "/nats.conf"]
 
+
+  postgres:
+    image: postgres:17
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=${POSTGRES_DB}
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./postgres_data:/var/lib/postgresql/data
+    restart: always
+
   firestore_reader:
     build:
       context: .
@@ -63,6 +76,7 @@ services:
       - SENTRY_DSN=${SENTRY_DSN}
       - LOKI_URL=${LOKI_URL}
       - ENVIRONMENT=${ENVIRONMENT}
+      - DATABASE_URL=postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres/${POSTGRES_DB}
     volumes:
       - ./cert.json:/usr/src/app/cert.json
     restart: unless-stopped
@@ -72,3 +86,21 @@ services:
       - nats
       - firestore_reader
       - jetstream_reader
+
+  web_server:
+    build:
+      context: .
+      dockerfile: web_server.Dockerfile
+    environment:
+      - BIND_WEB=0.0.0.0:8000
+      - RUST_LOG=info,web_server:debug
+      - RUST_BACKTRACE=1
+      - SENTRY_DSN=${SENTRY_DSN}
+      - LOKI_URL=${LOKI_URL}
+      - ENVIRONMENT=${ENVIRONMENT}
+      - DATABASE_URL=postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres/${POSTGRES_DB}
+    restart: unless-stopped
+    ports:
+      - "8004:8000"
+    depends_on:
+      - notifier

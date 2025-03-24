@@ -4,7 +4,6 @@ use async_nats::jetstream::stream::Stream;
 use async_nats::jetstream::Message;
 use axum::{routing::get, Router};
 use bluesky_utils::{bluesky_browseable_url, parse_created_at, parse_uri};
-use cached::proc_macro::cached;
 use futures::TryStreamExt;
 use lazy_static::lazy_static;
 use prometheus::{
@@ -27,7 +26,22 @@ use tracing_subscriber::Layer;
 use user_settings::{AllUserSettings, UserSettingsMap};
 mod fcm;
 use crate::fcm::FcmClient;
+use database_schema::{notifications, NewNotification};
 use url::Url;
+
+use diesel::prelude::*;
+
+use diesel_async::{AsyncPgConnection, RunQueryDsl};
+
+use diesel_async::pooled_connection::deadpool::Pool;
+use diesel_async::pooled_connection::AsyncDieselConnectionManager;
+
+use diesel_migrations::{embed_migrations, EmbeddedMigrations, MigrationHarness};
+
+pub const MIGRATIONS: EmbeddedMigrations = embed_migrations!("../migrations");
+
+const MAX_NOTIFICATION_AGE: i64 = 30;
+const MAX_USER_NOTIFICATIONS: usize = 100;
 
 const OLDEST_POST_AGE: chrono::Duration = chrono::Duration::hours(2);
 lazy_static! {
@@ -132,7 +146,9 @@ impl JetstreamPost {
     }
 
     fn get_embed_headline(&self) -> Option<String> {
-        return self.raw_json["commit"]["record"]["embed"]["external"]["title"].as_str().map(|s| s.to_string());
+        return self.raw_json["commit"]["record"]["embed"]["external"]["title"]
+            .as_str()
+            .map(|s| s.to_string());
     }
 }
 
@@ -440,7 +456,7 @@ async fn load_bluesky_post(
                 "rkey": rkey,
                 "record": raw_json_response["posts"][0]["record"].clone()
             }
-        })
+        }),
     };
 
     Ok(post)
@@ -458,17 +474,17 @@ async fn load_post_image(
     let response = client.get(&url).send().await;
     if response.is_err() {
         let msg: String = response.unwrap_err().to_string();
-        error!("Error getting post: {}", msg);
+        warn!("Error getting post: {}", msg);
         return Err(msg.into());
     }
     let response = response?;
     if !response.status().is_success() {
         let msg: String = response.error_for_status().unwrap_err().to_string();
-        error!("Error getting post: {}", msg);
+        warn!("Error getting post: {}", msg);
         return Err(msg.into());
     }
     let raw_json_response: Value = response.json().await?;
-    
+
     let image = raw_json_response["posts"][0]["embed"]["images"][0]["thumb"].as_str();
     if let Some(image) = image {
         return Ok(Some(image.to_string()));
@@ -478,7 +494,6 @@ async fn load_post_image(
         return Ok(Some(image.to_string()));
     }
     Ok(None)
-
 }
 
 async fn check_possible_recipient(
@@ -569,6 +584,7 @@ async fn process_post(
     user_settings: SharedUserSettings,
     fcm_client: Option<Arc<FcmClient>>,
     cache: Store,
+    pg: Option<Pool<AsyncPgConnection>>,
 ) {
     info!("Processing post: {:?}", post.post_id());
     let poster_did = post.did.clone();
@@ -757,22 +773,21 @@ async fn process_post(
 
     let image: Option<String> = {
         info!("Loading post image..");
-        let post_uri = format!("at://{}/app.bsky.feed.post/{}", source_post.did, source_post.commit.rkey);
+        let post_uri = format!(
+            "at://{}/app.bsky.feed.post/{}",
+            source_post.did, source_post.commit.rkey
+        );
         retry
-            .retry(|| {
-                timeout(
-                    Duration::from_secs(20),
-                    load_post_image(&post_uri, None),
-                )
-            })
+            .retry(|| timeout(Duration::from_secs(20), load_post_image(&post_uri, None)))
             .await
             .unwrap_or(Ok(None))
             .unwrap_or(None)
     };
 
-    let has_external_link = source_post_record.embed.as_ref().map_or(false, |embed| {
-        embed.embed_type.contains("external")
-    });
+    let has_external_link = source_post_record
+        .embed
+        .as_ref()
+        .map_or(false, |embed| embed.embed_type.contains("external"));
     if has_external_link {
         if let Some(headline) = source_post.get_embed_headline() {
             let headline_text = format!("Link: {}", headline);
@@ -857,8 +872,86 @@ async fn process_post(
         notification_body,
         image,
         url,
+        pg,
     )
     .await;
+}
+
+async fn update_db_notifications(
+    fcm_recipients: HashSet<String>,
+    title: String,
+    body: String,
+    image: Option<String>,
+    url: String,
+    pg_pool: Pool<AsyncPgConnection>,
+) {
+    let pool = pg_pool.get().await;
+    if pool.is_err() {
+        error!("Error getting pg connection!");
+    } else {
+        let mut new_notifications = Vec::new();
+        for fcm_token in &fcm_recipients {
+            new_notifications.push(NewNotification {
+                user_id: fcm_token.clone(),
+                title: title.clone(),
+                body: body.clone(),
+                url: url.clone(),
+                image: image.clone(),
+            });
+        }
+
+        let mut con = pool.unwrap();
+        let res = diesel::insert_into(notifications::table)
+            .values(&new_notifications)
+            .execute(&mut con)
+            .await;
+        if res.is_err() {
+            error!("Error inserting notifications: {:?}", res);
+        }
+        // remove notifications older than 30 days
+        let res = diesel::delete(
+            notifications::table.filter(
+                notifications::dsl::created_at
+                    .lt(chrono::Utc::now().naive_utc()
+                        - chrono::Duration::days(MAX_NOTIFICATION_AGE)),
+            ),
+        )
+        .execute(&mut con)
+        .await;
+        if res.is_err() {
+            error!("Error deleting old notifications: {:?}", res);
+        }
+        for fcm_token in &fcm_recipients {
+            let notifications_inner = diesel::alias!(notifications as notifs_inner);
+
+            let result = diesel::delete(
+                notifications::table.filter(
+                    notifications::dsl::user_id.eq(fcm_token.clone()).and(
+                        notifications::dsl::id.ne_all(
+                            notifications_inner
+                                .select(notifications_inner.field(notifications::dsl::id))
+                                .filter(
+                                    notifications_inner
+                                        .field(notifications::dsl::user_id)
+                                        .eq(fcm_token.clone()),
+                                )
+                                .order_by(
+                                    notifications_inner
+                                        .field(notifications::dsl::created_at)
+                                        .desc(),
+                                )
+                                .limit(MAX_USER_NOTIFICATIONS as i64),
+                        ),
+                    ),
+                ),
+            )
+            .execute(&mut con)
+            .await;
+            if result.is_err() {
+                error!("Error deleting old notifications: {:?}", result);
+            }
+        }
+    }
 }
 
 async fn send_notification(
@@ -868,6 +961,7 @@ async fn send_notification(
     body: String,
     image: Option<String>,
     url: String,
+    pg: Option<Pool<AsyncPgConnection>>,
 ) {
     info!("Sending notification to {} users", fcm_recipients.len());
     info!("Title: {}", title);
@@ -880,6 +974,16 @@ async fn send_notification(
     if mock || fcm_client.is_none() {
         warn!("Mock mode, will not send notification!");
         return;
+    }
+    if let Some(pg_pool) = pg {
+        let fcm_recipients = fcm_recipients.clone();
+        let title = title.clone();
+        let body = body.clone();
+        let image = image.clone();
+        let url = url.clone();
+        tokio::spawn(async move {
+            update_db_notifications(fcm_recipients, title, body, image, url, pg_pool).await;
+        });
     }
     let fcm_client = fcm_client.unwrap();
     let mut message = serde_json::json!({
@@ -923,7 +1027,7 @@ async fn send_notification(
         message["message"]["token"] = Value::String(fcm_token);
         let response = fcm_client.send(message.clone()).await;
         if response.is_err() {
-            error!("Error sending notification: {:?}", response);
+            warn!("Error sending notification: {:?}", response);
         }
     }
 }
@@ -933,6 +1037,7 @@ async fn listen_to_posts(
     user_settings: SharedUserSettings,
     fcm_client: Arc<FcmClient>,
     cache: Store,
+    pg: Option<Pool<AsyncPgConnection>>,
 ) {
     let consumer = posts_stream
         .get_or_create_consumer(
@@ -955,7 +1060,7 @@ async fn listen_to_posts(
             let json_string = String::from_utf8_lossy(message.payload.as_ref());
             let post: Result<JetstreamPost, _> = JetstreamPost::parse_raw_json(&json_string);
             if post.is_err() {
-                error!(
+                warn!(
                     "Failed to deserialize post: {:?}\nData: {}",
                     post, json_string
                 );
@@ -968,7 +1073,7 @@ async fn listen_to_posts(
             let post = post.unwrap();
             let post_datetime = post.post_datetime();
             if post_datetime.is_none() {
-                error!("Error parsing post datetime");
+                warn!("Error parsing post datetime");
                 _ = message.ack().await;
                 continue;
             }
@@ -984,12 +1089,24 @@ async fn listen_to_posts(
                 let user_settings = user_settings.clone();
                 let fcm_client = fcm_client.clone();
                 let cache = cache.clone();
+                let pg = pg.clone();
                 debug!("Spawning process_post");
                 async move {
                     let result = timeout(
                         Duration::from_secs(60 * 5),
-                        process_post(post, Some(message), user_settings, Some(fcm_client), cache)
-                            .instrument(span!(Level::INFO, "process", post_id = post_id.as_str())),
+                        process_post(
+                            post,
+                            Some(message),
+                            user_settings,
+                            Some(fcm_client),
+                            cache,
+                            pg,
+                        )
+                        .instrument(span!(
+                            Level::INFO,
+                            "process",
+                            post_id = post_id.as_str()
+                        )),
                     )
                     .await;
                     if result.is_err() {
@@ -1078,18 +1195,37 @@ async fn _main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     .with_writer(std::io::stdout)
                     .with_filter(tracing_subscriber::filter::EnvFilter::from_default_env()),
             )
+            .with(sentry_tracing::layer())
             .init();
 
         tokio::spawn(task);
         tracing::info!("Notifier starting, loki tracing enabled.");
     } else {
-        error!("LOKI_URL not set, will not send logs to Loki");
-        tracing_subscriber::fmt::init();
+        warn!("LOKI_URL not set, will not send logs to Loki");
+        tracing_subscriber::registry()
+            .with(tracing_subscriber::fmt::layer())
+            .with(sentry_tracing::layer())
+            .init();
     }
 
     TOKIO_ALIVE_TASKS.set(0);
     RECEIVED_MESSAGES_COUNTER.reset();
     NOTIFICATIONS_SENT_COUNTER.reset();
+
+    info!("Getting DB");
+    let pg_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+    let pg_config = AsyncDieselConnectionManager::<diesel_async::AsyncPgConnection>::new(&pg_url);
+    let pg_pool = Pool::builder(pg_config).build()?;
+
+    info!("DB connected");
+
+    info!("Running migrations");
+    {
+        let mut connection = PgConnection::establish(&pg_url)
+            .unwrap_or_else(|_| panic!("Error connecting to {}", pg_url));
+        connection.run_pending_migrations(MIGRATIONS)?;
+    }
+    info!("Migrations complete");
 
     let mut nats_host = std::env::var("NATS_HOST").unwrap_or("localhost".to_string());
     if !nats_host.contains(':') {
@@ -1146,7 +1282,14 @@ async fn _main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     });
     let shared_settings = user_settings.clone();
     tasks.spawn(async move {
-        listen_to_posts(posts_stream, shared_settings, fcm_client.clone(), cache).await;
+        listen_to_posts(
+            posts_stream,
+            shared_settings,
+            fcm_client.clone(),
+            cache,
+            Some(pg_pool),
+        )
+        .await;
     });
     let shared_settings = user_settings.clone();
     tasks.spawn(async move {
@@ -1167,13 +1310,26 @@ fn main() {
                 ..Default::default()
             },
         ));
-    }
+        let result = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(_main());
 
-    _ = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .unwrap()
-        .block_on(_main());
+        if let Err(e) = result {
+            eprintln!("Error: {:?}", e);
+        }
+    } else {
+        let result = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(_main());
+
+        if let Err(e) = result {
+            eprintln!("Error: {:?}", e);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1213,12 +1369,12 @@ mod tests {
         let post = load_post_image(uri, None).await.unwrap().unwrap();
         println!("{:?}", post);
         assert!(post.contains("https://cdn.bsky.app/img/feed_thumbnail/plain/"));
-        
+
         let uri = "at://did:plc:vhwscbpufmtoekc5hyz73vpa/app.bsky.feed.post/3lcowy446uk27";
         let post = load_post_image(uri, None).await.unwrap().unwrap();
         println!("{:?}", post);
         assert!(post.contains("https://cdn.bsky.app/img/feed_thumbnail/plain/"));
-        
+
         let uri = "at://did:plc:vhwscbpufmtoekc5hyz73vpa/app.bsky.feed.post/3lkrr752sxc26";
         let post = load_post_image(uri, None).await.unwrap().unwrap();
         println!("{:?}", post);
@@ -1257,12 +1413,23 @@ mod tests {
         println!("{:?}\n\n", post);
         let headline = post.get_embed_headline();
         println!("Headline: {:?}", headline);
-        assert_eq!(headline, Some("Disinformation by hostile states a 'threat to democracies'".to_string()));
+        assert_eq!(
+            headline,
+            Some("Disinformation by hostile states a 'threat to democracies'".to_string())
+        );
 
-        let post: JetstreamPost = load_bluesky_post("at://did:plc:annmh2aamt3ctc2gubsvi6dj/app.bsky.feed.post/3lkritvwbkg2t", None).await.unwrap();
+        let post: JetstreamPost = load_bluesky_post(
+            "at://did:plc:annmh2aamt3ctc2gubsvi6dj/app.bsky.feed.post/3lkritvwbkg2t",
+            None,
+        )
+        .await
+        .unwrap();
         println!("{:?}\n\n", post);
         let headline = post.get_embed_headline();
         println!("Headline: {:?}", headline);
-        assert_eq!(headline, Some("Disinformation by hostile states a 'threat to democracies'".to_string()));
+        assert_eq!(
+            headline,
+            Some("Disinformation by hostile states a 'threat to democracies'".to_string())
+        );
     }
 }

@@ -2,31 +2,24 @@ FROM rust:1-bookworm as builder
 
 WORKDIR /app
 
-RUN USER=root cargo new --bin notifier
+RUN USER=root cargo new --bin web_server
 RUN USER=root cargo new --bin bluesky_utils
 RUN USER=root cargo new --bin database_schema
 RUN USER=root cargo new --bin user_settings
 
-WORKDIR /app/notifier
+WORKDIR /app/web_server
 
-COPY ./notifier/Cargo.toml /app/notifier/Cargo.toml
-COPY ./bluesky_utils/Cargo.toml /app/bluesky_utils/Cargo.toml
+COPY ./web_server/Cargo.toml /app/web_server/Cargo.toml
 COPY ./database_schema/Cargo.toml /app/database_schema/Cargo.toml
-COPY ./user_settings/Cargo.toml /app/user_settings/Cargo.toml
 
 RUN cargo build --release
-RUN rm /app/notifier/src/*.rs
-RUN rm /app/bluesky_utils/src/*.rs
+RUN rm /app/web_server/src/*.rs
 RUN rm /app/database_schema/src/*.rs
-RUN rm /app/user_settings/src/*.rs
 
-ADD ./notifier/. /app/notifier
-ADD ./bluesky_utils/. /app/bluesky_utils
+ADD ./web_server/. /app/web_server
 ADD ./database_schema/. /app/database_schema
-ADD ./user_settings/. /app/user_settings
-ADD ./migrations/. /app/migrations
 
-RUN rm /app/notifier/target/release/deps/notifier*
+RUN rm /app/web_server/target/release/deps/web_server*
 
 RUN cargo build --release
 
@@ -47,11 +40,11 @@ RUN groupadd $APP_USER \
     && useradd -g $APP_USER $APP_USER \
     && mkdir -p ${APP}
 
-COPY --from=builder /app/notifier/target/release/notifier ${APP}/notifier
+COPY --from=builder /app/web_server/target/release/web_server ${APP}/web_server
 
 RUN chown -R $APP_USER:$APP_USER ${APP}
 
 USER $APP_USER
 WORKDIR ${APP}
 
-CMD ["./notifier"]
+CMD ["./web_server"]

@@ -5,5 +5,5 @@ members = [
     "notifier",
     "firestore_reader",
     "user_settings",
-    "bluesky_utils",
+    "bluesky_utils", "database_schema", "web_server",
 ]

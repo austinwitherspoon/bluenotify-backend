@@ -12,6 +12,8 @@ axum = "0.8.1"
 bluesky_utils = { path = "../bluesky_utils" }
 cached = { version = "0.54.0", features = ["async"] }
 chrono = "0.4.39"
+diesel = { version = "2.2.8", features = ["postgres"] }
+dotenvy = "0.15.7"
 futures = "0.3.31"
 lazy_static = "1.5.0"
 prometheus = "0.13.4"
@@ -26,4 +28,8 @@ tracing-loki = "0.2.6"
 tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
 url = "2.5.4"
 user_settings = { path = "../user_settings" }
+database_schema = { path = "../database_schema" }
 yup-oauth2 = "9.0.0"
+diesel-async = { version = "0.5.2", features = ["postgres", "deadpool"] }
+diesel_migrations = { version = "2.2.0", features = ["postgres"] }
+sentry-tracing = "0.36.0"
