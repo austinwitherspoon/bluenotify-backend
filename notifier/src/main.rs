@@ -43,6 +43,8 @@ pub const MIGRATIONS: EmbeddedMigrations = embed_migrations!("../migrations");
 const MAX_NOTIFICATION_AGE: i64 = 30;
 const MAX_USER_NOTIFICATIONS: usize = 100;
 
+const NSFW_LABELS: [&str; 7] = ["!hide", "!warn", "!no-unauthenticated", "porn", "sexual", "graphic-media", "nudity"];
+
 const OLDEST_POST_AGE: chrono::Duration = chrono::Duration::hours(2);
 lazy_static! {
     static ref RECEIVED_MESSAGES_COUNTER: IntCounter = register_int_counter!(
@@ -484,6 +486,17 @@ async fn load_post_image(
         return Err(msg.into());
     }
     let raw_json_response: Value = response.json().await?;
+
+    let labels = raw_json_response["posts"][0]["labels"].as_array().map(|labels| {
+        labels.iter().map(|label| label["val"].as_str().unwrap_or("")).collect::<Vec<&str>>()
+    });
+    if let Some(labels) = labels {
+        for label in labels {
+            if NSFW_LABELS.contains(&label) {
+                return Ok(None);
+            }
+        }
+    }
 
     let image = raw_json_response["posts"][0]["embed"]["images"][0]["thumb"].as_str();
     if let Some(image) = image {
@@ -1366,19 +1379,25 @@ mod tests {
     #[tokio::test]
     async fn test_get_image() {
         let uri = "at://did:plc:vhwscbpufmtoekc5hyz73vpa/app.bsky.feed.post/3lcowibggzk2n";
-        let post = load_post_image(uri, None).await.unwrap().unwrap();
-        println!("{:?}", post);
-        assert!(post.contains("https://cdn.bsky.app/img/feed_thumbnail/plain/"));
+        let image_url = load_post_image(uri, None).await.unwrap().unwrap();
+        println!("{:?}", image_url);
+        assert!(image_url.contains("https://cdn.bsky.app/img/feed_thumbnail/plain/"));
 
         let uri = "at://did:plc:vhwscbpufmtoekc5hyz73vpa/app.bsky.feed.post/3lcowy446uk27";
-        let post = load_post_image(uri, None).await.unwrap().unwrap();
-        println!("{:?}", post);
-        assert!(post.contains("https://cdn.bsky.app/img/feed_thumbnail/plain/"));
+        let image_url = load_post_image(uri, None).await.unwrap().unwrap();
+        println!("{:?}", image_url);
+        assert!(image_url.contains("https://cdn.bsky.app/img/feed_thumbnail/plain/"));
 
         let uri = "at://did:plc:vhwscbpufmtoekc5hyz73vpa/app.bsky.feed.post/3lkrr752sxc26";
-        let post = load_post_image(uri, None).await.unwrap().unwrap();
-        println!("{:?}", post);
-        assert!(post.contains("https://cdn.bsky.app/img/feed_thumbnail/plain/"));
+        let image_url = load_post_image(uri, None).await.unwrap().unwrap();
+        println!("{:?}", image_url);
+        assert!(image_url.contains("https://cdn.bsky.app/img/feed_thumbnail/plain/"));
+
+        let nsfw_uri = "at://did:plc:kxrs3pexsaohn2j3d5thkr7r/app.bsky.feed.post/3ljuk522j7s23";
+        let image_url = load_post_image(nsfw_uri, None).await.unwrap();
+        println!("{:?}", image_url);
+        assert!(image_url.is_none());
+        
     }
 
     #[test]
