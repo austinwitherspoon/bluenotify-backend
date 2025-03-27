@@ -115,7 +115,7 @@ async fn _main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let governor_conf = Arc::new(
         GovernorConfigBuilder::default()
             .per_second(1)
-            .burst_size(5)
+            .burst_size(30)
             .finish()
             .unwrap(),
     );
