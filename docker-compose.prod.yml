@@ -1,0 +1,97 @@
+version: '3.8'
+
+services:
+  nats:
+    image: ${PRIVATE_DOCKER_REGISTRY}/ci/nats:latest
+    ports:
+      - "4222:4222"
+      - "8222:8222"
+    volumes:
+      - ./nats.conf:/nats.conf
+    restart: always
+    command: [ "-js", "--config", "/nats.conf" ]
+
+  postgres:
+    image: ${PRIVATE_DOCKER_REGISTRY}/ci/postgres:17
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=${POSTGRES_DB}
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./postgres_data:/var/lib/postgresql/data
+    restart: always
+
+  firestore_reader:
+    image: ${PRIVATE_DOCKER_REGISTRY}/ci/blue_notify_firestore_reader:latest
+    environment:
+      - NATS_HOST=nats://nats:4222
+      - BIND_FIRESTORE_READER=0.0.0.0:8000
+      - SETTINGS_COLLECTION=${SETTINGS_COLLECTION}
+      - GOOGLE_APPLICATION_CREDENTIALS=./cert.json
+      - GOOGLE_CLOUD_PROJECT=${GOOGLE_CLOUD_PROJECT}
+      - RUST_LOG=info
+      - RUST_BACKTRACE=1
+      - SENTRY_DSN=${SENTRY_DSN}
+    volumes:
+      - ./cert.json:/usr/src/app/cert.json
+    restart: unless-stopped
+    ports:
+      - "8001:8000"
+    depends_on:
+      - nats
+
+  jetstream_reader:
+    image: ${PRIVATE_DOCKER_REGISTRY}/ci/blue_notify_jetstream_reader:latest
+    environment:
+      - NATS_HOST=nats://nats:4222
+      - BIND_JETSTREAM_READER=0.0.0.0:8000
+      - RUST_LOG=info
+      - RUST_BACKTRACE=1
+      - SENTRY_DSN=${SENTRY_DSN}
+    restart: unless-stopped
+    ports:
+      - "8002:8000"
+    depends_on:
+      - nats
+      - firestore_reader
+
+  notifier:
+    image: ${PRIVATE_DOCKER_REGISTRY}/ci/blue_notify_notifier:latest
+    environment:
+      - NATS_HOST=nats://nats:4222
+      - BIND_NOTIFIER=0.0.0.0:8000
+      - GOOGLE_APPLICATION_CREDENTIALS=./cert.json
+      - MOCK=${MOCK}
+      - RUST_LOG=info,notifier:debug
+      - RUST_BACKTRACE=1
+      - SENTRY_DSN=${SENTRY_DSN}
+      - LOKI_URL=${LOKI_URL}
+      - ENVIRONMENT=${ENVIRONMENT}
+      - DATABASE_URL=postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres/${POSTGRES_DB}
+    volumes:
+      - ./cert.json:/usr/src/app/cert.json
+    restart: unless-stopped
+    ports:
+      - "8003:8000"
+    depends_on:
+      - nats
+      - firestore_reader
+      - jetstream_reader
+
+  web_server:
+    image: ${PRIVATE_DOCKER_REGISTRY}/ci/blue_notify_web_server:latest
+    environment:
+      - BIND_WEB=0.0.0.0:8000
+      - RUST_LOG=info,web_server:debug
+      - RUST_BACKTRACE=1
+      - SENTRY_DSN=${SENTRY_DSN}
+      - LOKI_URL=${LOKI_URL}
+      - ENVIRONMENT=${ENVIRONMENT}
+      - DATABASE_URL=postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres/${POSTGRES_DB}
+    restart: unless-stopped
+    ports:
+      - "8004:8000"
+    depends_on:
+      - notifier

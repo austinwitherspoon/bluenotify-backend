@@ -1,0 +1,54 @@
+name: Publish Firestore Reader Docker Container
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/deploy_firestore_reader.yml'
+      - 'firestore_reader.Dockerfile'
+      - 'firestore_reader/**'
+      - 'user_settings/**'
+  workflow_dispatch:
+
+
+jobs:
+  test_firestore_reader:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        BUILD_TARGET: [release] # refers to a cargo profile
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install stable --profile minimal
+      - uses: Swatinem/rust-cache@v2
+      - name: Run tests in "${{ matrix.BUILD_TARGET }}" mode
+        run: cargo test --profile ${{ matrix.BUILD_TARGET }} --package firestore_reader
+
+  
+  publish_firestore_reader:
+    name: Publish Firestore Reader
+    runs-on: ubuntu-latest
+    needs: test_firestore_reader
+    steps:
+      - name: Login to Container Registry
+        uses: docker/login-action@v3
+        with:
+          username: ci
+          password: ${{ secrets.PRIVATE_DOCKER_PASSWORD }}
+          registry: ${{ secrets.PRIVATE_DOCKER_REGISTRY }}
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          file: ./firestore_reader.Dockerfile
+          push: true
+          tags: ${{ secrets.PRIVATE_DOCKER_REGISTRY }}/ci/blue_notify_firestore_reader:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

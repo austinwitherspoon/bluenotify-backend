@@ -10,7 +10,8 @@ wheels/
 .venv
 
 
-.*/
+*_cache/
+.venv/
 
 
 .vscode/
