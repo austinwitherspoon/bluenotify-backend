@@ -7,6 +7,7 @@ use diesel::prelude::*;
 use diesel_async::pooled_connection::deadpool::Pool;
 use diesel_async::pooled_connection::AsyncDieselConnectionManager;
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
+use tower_governor::key_extractor;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -114,8 +115,9 @@ async fn _main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     let governor_conf = Arc::new(
         GovernorConfigBuilder::default()
-            .per_second(1)
-            .burst_size(30)
+            .key_extractor(key_extractor::SmartIpKeyExtractor {})
+            .per_second(10)
+            .burst_size(5)
             .finish()
             .unwrap(),
     );
