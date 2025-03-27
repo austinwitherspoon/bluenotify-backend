@@ -116,7 +116,7 @@ async fn _main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let governor_conf = Arc::new(
         GovernorConfigBuilder::default()
             .key_extractor(key_extractor::SmartIpKeyExtractor {})
-            .per_second(1)
+            .period(Duration::from_millis(500))
             .burst_size(10)
             .finish()
             .unwrap(),
