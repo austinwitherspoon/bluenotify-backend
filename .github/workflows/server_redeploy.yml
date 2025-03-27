@@ -15,8 +15,9 @@ on:
 
 
 jobs:
-  test_web_server:
-    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+  deploy_latest_servers:
+    name: Redeploy latest servers
+    if: ${{ github.event.action.workflow_dispatch || (github.event.workflow_run.conclusion == 'success') }}
     runs-on: ubuntu-latest
     steps:
       - name: Tailscale
@@ -44,4 +45,4 @@ jobs:
           SSH_HOST: ${{ secrets.MAIN_BLUENOTIFY_SERVER }}
 
       - name: Start the server
-        run: ssh staging './update_services.sh'
+        run: ssh prod './update_services.sh'
