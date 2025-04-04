@@ -365,17 +365,20 @@ async fn _main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 fn main() {
     let sentry_dsn = std::env::var("SENTRY_DSN");
     if sentry_dsn.is_ok() && !sentry_dsn.as_ref().unwrap().is_empty() {
-        let _guard = sentry::init((sentry_dsn.ok(), sentry::ClientOptions {
-            release: sentry::release_name!(),
-            ..Default::default()
-        }));
+        let _guard = sentry::init((
+            sentry_dsn.ok(),
+            sentry::ClientOptions {
+                release: sentry::release_name!(),
+                ..Default::default()
+            },
+        ));
     }
-    
+
     _ = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .unwrap()
-            .block_on(_main());
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(_main());
 }
 
 async fn metrics() -> String {

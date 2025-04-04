@@ -1,5 +1,34 @@
 // @generated automatically by Diesel CLI.
 
+pub mod sql_types {
+    #[derive(diesel::query_builder::QueryId, Clone, diesel::sql_types::SqlType)]
+    #[diesel(postgres_type(name = "post_notification_type"))]
+    pub struct PostNotificationType;
+}
+
+diesel::table! {
+    accounts (account_did, user_id) {
+        user_id -> Int4,
+        account_did -> Text,
+        created_at -> Timestamp,
+    }
+}
+
+diesel::table! {
+    use diesel::sql_types::*;
+    use super::sql_types::PostNotificationType;
+
+    notification_settings (user_id, user_account_did, following_did) {
+        user_id -> Int4,
+        user_account_did -> Text,
+        following_did -> Text,
+        post_type -> Array<Nullable<PostNotificationType>>,
+        word_allow_list -> Nullable<Array<Nullable<Text>>>,
+        word_block_list -> Nullable<Array<Nullable<Text>>>,
+        created_at -> Timestamp,
+    }
+}
+
 diesel::table! {
     notifications (id) {
         id -> Int4,
@@ -11,3 +40,23 @@ diesel::table! {
         image -> Nullable<Text>,
     }
 }
+
+diesel::table! {
+    users (id) {
+        id -> Int4,
+        fcm_token -> Text,
+        created_at -> Timestamp,
+        updated_at -> Timestamp,
+        deleted_at -> Nullable<Timestamp>,
+    }
+}
+
+diesel::joinable!(accounts -> users (user_id));
+diesel::joinable!(notification_settings -> users (user_id));
+
+diesel::allow_tables_to_appear_in_same_query!(
+    accounts,
+    notification_settings,
+    notifications,
+    users,
+);

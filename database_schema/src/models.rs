@@ -1,6 +1,43 @@
-use diesel::prelude::*;
-use serde::Serialize;
+use std::fmt::Display;
+
 use crate::timestamp::SerializableTimestamp;
+use diesel::{prelude::*, sql_types::Nullable};
+use serde::Serialize;
+
+#[derive(Debug, Clone, Copy, diesel_derive_enum::DbEnum)]
+#[db_enum(
+    existing_type_path = "crate::schema::sql_types::PostNotificationType",
+    value_style = "camelCase"
+)]
+pub enum NotificationType {
+    Post,
+    Repost,
+    Reply,
+    ReplyToFriend,
+}
+
+impl NotificationType {
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "post" => Some(NotificationType::Post),
+            "repost" => Some(NotificationType::Repost),
+            "reply" => Some(NotificationType::Reply),
+            "replyToFriend" => Some(NotificationType::ReplyToFriend),
+            _ => None,
+        }
+    }
+}
+
+impl Display for NotificationType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            NotificationType::Post => write!(f, "post"),
+            NotificationType::Repost => write!(f, "repost"),
+            NotificationType::Reply => write!(f, "reply"),
+            NotificationType::ReplyToFriend => write!(f, "replyToFriend"),
+        }
+    }
+}
 
 #[derive(Queryable, Selectable, Serialize, Debug)]
 #[diesel(table_name = crate::schema::notifications)]
@@ -24,4 +61,46 @@ pub struct NewNotification {
     pub body: String,
     pub url: String,
     pub image: Option<String>,
+}
+
+#[derive(Queryable, Selectable, Serialize, Debug)]
+#[diesel(table_name = crate::schema::users)]
+#[diesel(check_for_backend(diesel::pg::Pg))]
+pub struct User {
+    pub id: i32,
+    pub fcm_token: String,
+    pub created_at: SerializableTimestamp,
+    pub updated_at: SerializableTimestamp,
+    pub deleted_at: Option<SerializableTimestamp>,
+}
+
+#[derive(Insertable, Debug)]
+#[diesel(table_name = crate::schema::users)]
+#[diesel(check_for_backend(diesel::pg::Pg))]
+pub struct NewUser {
+    pub fcm_token: String,
+    pub created_at: SerializableTimestamp,
+    pub updated_at: SerializableTimestamp,
+}
+
+#[derive(Insertable, Debug)]
+#[diesel(table_name = crate::schema::accounts)]
+#[diesel(check_for_backend(diesel::pg::Pg))]
+pub struct NewUserAccount {
+    pub user_id: i32,
+    pub account_did: String,
+    pub created_at: SerializableTimestamp,
+}
+
+#[derive(Insertable, Debug)]
+#[diesel(table_name = crate::schema::notification_settings)]
+#[diesel(check_for_backend(diesel::pg::Pg))]
+pub struct UserSetting {
+    pub user_id: i32,
+    pub user_account_did: String,
+    pub following_did: String,
+    pub post_type: Vec<NotificationType>,
+    pub word_allow_list: Option<Vec<Option<String>>>,
+    pub word_block_list: Option<Vec<Option<String>>>,
+    pub created_at: SerializableTimestamp,
 }

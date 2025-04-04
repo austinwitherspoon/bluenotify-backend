@@ -14,6 +14,13 @@ pub struct SerializableTimestamp {
     timestamp: chrono::NaiveDateTime,
 }
 
+impl SerializableTimestamp {
+    pub fn now() -> Self {
+        let timestamp = chrono::Utc::now().naive_utc();
+        SerializableTimestamp { timestamp }
+    }
+}
+
 impl From<chrono::NaiveDateTime> for SerializableTimestamp {
     fn from(timestamp: chrono::NaiveDateTime) -> Self {
         SerializableTimestamp { timestamp }

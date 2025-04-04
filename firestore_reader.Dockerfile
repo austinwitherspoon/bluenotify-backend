@@ -4,18 +4,23 @@ WORKDIR /app
 
 RUN USER=root cargo new --bin firestore_reader
 RUN USER=root cargo new --bin user_settings
+RUN USER=root cargo new --bin database_schema
 
 WORKDIR /app/firestore_reader
 
 COPY ./firestore_reader/Cargo.toml /app/firestore_reader/Cargo.toml
 COPY ./user_settings/Cargo.toml /app/user_settings/Cargo.toml
+COPY ./database_schema/Cargo.toml /app/database_schema/Cargo.toml
 
 RUN cargo build --release
 RUN rm /app/firestore_reader/src/*.rs
 RUN rm /app/user_settings/src/*.rs
+RUN rm /app/database_schema/src/*.rs
 
 ADD ./firestore_reader/. /app/firestore_reader
 ADD ./user_settings/. /app/user_settings
+ADD ./database_schema/. /app/database_schema
+ADD ./migrations/. /app/migrations
 
 RUN rm /app/firestore_reader/target/release/deps/firestore_reader*
 
@@ -26,7 +31,7 @@ FROM debian:bookworm
 ARG APP=/usr/src/app
 
 RUN apt-get update \
-    && apt-get install -y ca-certificates tzdata \
+    && apt-get install -y ca-certificates tzdata libpq5 \
     && rm -rf /var/lib/apt/lists/*
 
 EXPOSE 8000

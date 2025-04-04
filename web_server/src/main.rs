@@ -1,18 +1,18 @@
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use axum::routing::{delete, post, get, Router};
+use axum::routing::{delete, get, post, Router};
 use axum_prometheus::PrometheusMetricLayer;
 use database_schema::{notifications, Notification};
 use diesel::prelude::*;
 use diesel_async::pooled_connection::deadpool::Pool;
 use diesel_async::pooled_connection::AsyncDieselConnectionManager;
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
-use tower_governor::key_extractor;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio::task::JoinSet;
+use tower_governor::key_extractor;
 use tower_governor::{governor::GovernorConfigBuilder, GovernorLayer};
 use tracing::{debug, error, info, span, warn, Instrument, Level};
 use tracing_subscriber::layer::SubscriberExt;
@@ -37,7 +37,11 @@ async fn get_notifications(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    info!("Found {} notifications for user: {}", results.len(), user_id);
+    info!(
+        "Found {} notifications for user: {}",
+        results.len(),
+        user_id
+    );
 
     Ok(serde_json::to_string(&results).unwrap())
 }

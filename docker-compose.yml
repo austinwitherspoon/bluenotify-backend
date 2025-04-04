@@ -37,6 +37,7 @@ services:
       - RUST_LOG=info
       - RUST_BACKTRACE=1
       - SENTRY_DSN=${SENTRY_DSN}
+      - DATABASE_URL=postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres/${POSTGRES_DB}
     volumes:
       - ./cert.json:/usr/src/app/cert.json
     restart: unless-stopped

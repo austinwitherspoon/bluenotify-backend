@@ -1,16 +1,22 @@
 use axum::{extract::State, routing::get, Router};
+use core::panic;
 use firestore::*;
+use futures::StreamExt;
+use lazy_static::lazy_static;
 use prometheus::{self, register_int_gauge, Encoder, IntGauge, TextEncoder};
 use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
+    vec,
 };
 use tokio::sync::RwLock;
 use tracing::{debug, error, info};
 
-use futures::stream::BoxStream;
-use futures::StreamExt;
-use lazy_static::lazy_static;
+use database_schema::diesel_async::RunQueryDsl;
+use database_schema::{
+    diesel::{self, prelude::*},
+    get_pool, run_migrations, DBPool,
+};
 use user_settings::UserSettings;
 
 lazy_static! {
@@ -31,6 +37,138 @@ type SharedState = Arc<RwLock<Settings>>;
 struct Settings {
     all_settings: HashMap<String, UserSettings>,
     kv: async_nats::jetstream::kv::Store,
+    db_pool: DBPool,
+}
+
+async fn send_user_settings_to_db(
+    db_pool: &DBPool,
+    settings: &UserSettings,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let mut conn = db_pool.get().await?;
+    let now = database_schema::timestamp::SerializableTimestamp::now();
+
+    let existing_user = database_schema::schema::users::table
+        .filter(database_schema::schema::users::dsl::fcm_token.eq(settings.fcm_token.clone()))
+        .first::<database_schema::models::User>(&mut conn)
+        .await
+        .ok();
+
+    let user = match existing_user {
+        Some(user) => {
+            // update updated_at timestamp and set deleted_at to null
+            diesel::update(database_schema::schema::users::table.filter(
+                database_schema::schema::users::dsl::fcm_token.eq(settings.fcm_token.clone()),
+            ))
+            .set((
+                database_schema::schema::users::dsl::updated_at.eq(now),
+                database_schema::schema::users::dsl::deleted_at.eq(None::<chrono::NaiveDateTime>),
+            ))
+            .execute(&mut conn)
+            .await?;
+            user
+        }
+        None => {
+            // if the user does not exist, create it
+            let new_user = database_schema::models::NewUser {
+                fcm_token: settings.fcm_token.clone(),
+                created_at: now,
+                updated_at: now,
+            };
+            diesel::insert_into(database_schema::schema::users::table)
+                .values(&new_user)
+                .get_result::<database_schema::models::User>(&mut conn)
+                .await?
+        }
+    };
+
+    // remove existing accounts for the user
+    diesel::delete(
+        database_schema::schema::accounts::table
+            .filter(database_schema::schema::accounts::dsl::user_id.eq(user.id)),
+    )
+    .execute(&mut conn)
+    .await?;
+
+    // create accounts
+    let accounts = settings
+        .accounts
+        .iter()
+        .map(|account| database_schema::models::NewUserAccount {
+            user_id: user.id,
+            account_did: account.clone(),
+            created_at: now,
+        })
+        .collect::<Vec<_>>();
+    diesel::insert_into(database_schema::schema::accounts::table)
+        .values(&accounts)
+        .execute(&mut conn)
+        .await?;
+
+    // remove existing notification settings for the user
+    diesel::delete(
+        database_schema::schema::notification_settings::table
+            .filter(database_schema::schema::notification_settings::dsl::user_id.eq(user.id)),
+    )
+    .execute(&mut conn)
+    .await?;
+
+    // create notification settings
+    // for now, make a copy of the settings for every account
+    let mut notification_settings = vec![];
+
+    for account in settings.accounts.iter() {
+        for (following_did, single_setting) in settings.settings.iter() {
+            let new_settings = database_schema::models::UserSetting {
+                user_id: user.id,
+                user_account_did: account.clone(),
+                following_did: following_did.clone(),
+                post_type: single_setting
+                    .post_types
+                    .iter()
+                    .map(|s| match s {
+                        user_settings::PostType::Post => {
+                            database_schema::models::NotificationType::Post
+                        }
+                        user_settings::PostType::Repost => {
+                            database_schema::models::NotificationType::Repost
+                        }
+                        user_settings::PostType::Reply => {
+                            database_schema::models::NotificationType::Reply
+                        }
+                        user_settings::PostType::ReplyToFriend => {
+                            database_schema::models::NotificationType::ReplyToFriend
+                        }
+                    })
+                    .collect(),
+                word_allow_list: Some(Vec::new()),
+                word_block_list: Some(Vec::new()),
+                created_at: now,
+            };
+            notification_settings.push(new_settings);
+        }
+    }
+
+    diesel::insert_into(database_schema::schema::notification_settings::table)
+        .values(&notification_settings)
+        .execute(&mut conn)
+        .await?;
+
+    Ok(())
+}
+
+async fn remove_user_settings_from_db(
+    db_pool: &DBPool,
+    id: &str,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let mut conn = db_pool.get().await?;
+    diesel::update(
+        database_schema::schema::users::table
+            .filter(database_schema::schema::users::dsl::fcm_token.eq(id)),
+    )
+    .set(database_schema::schema::users::dsl::deleted_at.eq(chrono::Utc::now().naive_utc()))
+    .execute(&mut conn)
+    .await?;
+    Ok(())
 }
 
 // The IDs of targets - must be different for different listener targets/listeners in case you have many instances
@@ -75,6 +213,9 @@ async fn _main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     info!("Starting up Google Firestore Listener.");
 
+    run_migrations()?;
+    let db_pool = get_pool()?;
+
     let mut nats_host = std::env::var("NATS_HOST").unwrap_or("localhost".to_string());
     if !nats_host.contains(':') {
         nats_host.push_str(":4222");
@@ -102,6 +243,7 @@ async fn _main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let state = Arc::new(RwLock::new(Settings {
         kv: kv_store,
         all_settings: HashMap::new(),
+        db_pool: db_pool.clone(),
     }));
 
     let collection_name = config_env_var("SETTINGS_COLLECTION")?;
@@ -121,8 +263,18 @@ async fn _main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let all_settings: Vec<UserSettings> = all_settings_stream.collect().await;
 
     {
+        info!("Deserializing settings from Firestore...");
         let mut state = state.write().await;
+        info!("Deserialized settings: {all_settings:?}");
         for setting in all_settings {
+            info!("Deserialized settings: {setting:?}");
+            let setting_copy = setting.clone();
+            let result = send_user_settings_to_db(&state.db_pool, &setting_copy).await;
+            if let Err(e) = result {
+                panic!("Error sending settings to DB: {e:?}",);
+            } else {
+                info!("Settings sent to DB successfully.");
+            }
             state
                 .all_settings
                 .insert(setting.fcm_token.clone(), setting);
@@ -184,9 +336,20 @@ async fn _main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                                                 return Ok(());
                                             }
                                         }
+                                        let settings_copy = (&settings).clone();
                                         state
                                             .all_settings
                                             .insert(settings.fcm_token.clone(), settings);
+                                        let result = send_user_settings_to_db(
+                                            &state.db_pool,
+                                            &settings_copy,
+                                        )
+                                        .await;
+                                        if let Err(e) = result {
+                                            error!("Error sending settings to DB: {e:?}");
+                                        } else {
+                                            info!("Settings sent to DB successfully.");
+                                        }
 
                                         let watched_users = watched_users(&state.all_settings);
                                         let watched_users_json =
@@ -216,6 +379,12 @@ async fn _main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                             let mut state = state.write().await;
                             let id = doc_delete.document.split('/').last().unwrap().to_string();
                             state.all_settings.remove(&id);
+                            let result = remove_user_settings_from_db(&state.db_pool, &id).await;
+                            if let Err(e) = result {
+                                error!("Error removing settings from DB: {e:?}");
+                            } else {
+                                info!("Settings removed from DB successfully.");
+                            }
                             let watched_users = watched_users(&state.all_settings);
                             let watched_users_json = serde_json::to_string(&watched_users).unwrap();
                             let all_users_json =
@@ -258,15 +427,31 @@ async fn _main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 fn main() {
     let sentry_dsn = std::env::var("SENTRY_DSN");
     if sentry_dsn.is_ok() && !sentry_dsn.as_ref().unwrap().is_empty() {
-        let _guard = sentry::init((sentry_dsn.ok(), sentry::ClientOptions {
-            release: sentry::release_name!(),
-            ..Default::default()
-        }));
-    }
-    
-    _ = tokio::runtime::Builder::new_multi_thread()
+        let _guard = sentry::init((
+            sentry_dsn.ok(),
+            sentry::ClientOptions {
+                release: sentry::release_name!(),
+                ..Default::default()
+            },
+        ));
+        let result = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
             .unwrap()
             .block_on(_main());
+
+        if let Err(e) = result {
+            eprintln!("Error: {:?}", e);
+        }
+    } else {
+        let result = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(_main());
+
+        if let Err(e) = result {
+            eprintln!("Error: {:?}", e);
+        }
+    }
 }

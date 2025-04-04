@@ -632,8 +632,12 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "diesel",
+ "diesel-async",
+ "diesel-derive-enum",
+ "diesel_migrations",
  "serde",
  "serde_json",
+ "tracing",
 ]
 
 [[package]]
@@ -714,6 +718,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "diesel-derive-enum"
+version = "3.0.0-beta.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "50a8c082045d01debc8589f8a0db9f2855a37c99c9b031325c856b5b98e1625f"
+dependencies = [
+ "heck 0.4.1",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.98",
+]
+
+[[package]]
 name = "diesel_derives"
 version = "2.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -782,7 +798,7 @@ checksum = "139ae9aca7527f85f26dd76483eb38533fd84bd571065da1739656ef71c5ff5b"
 dependencies = [
  "darling",
  "either",
- "heck",
+ "heck 0.5.0",
  "proc-macro2",
  "quote",
  "syn 2.0.98",
@@ -901,6 +917,7 @@ dependencies = [
  "async-nats",
  "axum 0.8.1",
  "chrono",
+ "database_schema",
  "firestore",
  "futures",
  "lazy_static",
@@ -1232,6 +1249,12 @@ checksum = "bf151400ff0baff5465007dd2f3e717f3fe502074ca563069ce3a6629d07b289"
 dependencies = [
  "foldhash",
 ]
+
+[[package]]
+name = "heck"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "95505c38b4572b2d910cecb0281560f54b440a19336cbbcb27bf6ce6adc6f5a8"
 
 [[package]]
 name = "heck"
@@ -1987,8 +2010,6 @@ dependencies = [
  "chrono",
  "database_schema",
  "diesel",
- "diesel-async",
- "diesel_migrations",
  "dotenvy",
  "futures",
  "lazy_static",

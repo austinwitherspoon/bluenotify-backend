@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
-    string,
+    fmt::Display,
 };
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Hash, Copy)]
@@ -14,6 +14,17 @@ pub enum PostType {
     Reply,
     #[serde(rename = "replyToFriend")]
     ReplyToFriend,
+}
+
+impl Display for PostType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PostType::Post => write!(f, "post"),
+            PostType::Repost => write!(f, "repost"),
+            PostType::Reply => write!(f, "reply"),
+            PostType::ReplyToFriend => write!(f, "replyToFriend"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

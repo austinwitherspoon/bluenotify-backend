@@ -18,6 +18,7 @@ RUN rm /app/database_schema/src/*.rs
 
 ADD ./web_server/. /app/web_server
 ADD ./database_schema/. /app/database_schema
+ADD ./migrations/. /app/migrations
 
 RUN rm /app/web_server/target/release/deps/web_server*
 

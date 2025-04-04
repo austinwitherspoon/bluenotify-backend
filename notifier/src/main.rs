@@ -26,24 +26,24 @@ use tracing_subscriber::Layer;
 use user_settings::{AllUserSettings, UserSettingsMap};
 mod fcm;
 use crate::fcm::FcmClient;
-use database_schema::{notifications, NewNotification};
+use database_schema::{get_pool, notifications, run_migrations, DBPool, NewNotification};
 use url::Url;
 
-use diesel::prelude::*;
-
-use diesel_async::{AsyncPgConnection, RunQueryDsl};
-
-use diesel_async::pooled_connection::deadpool::Pool;
-use diesel_async::pooled_connection::AsyncDieselConnectionManager;
-
-use diesel_migrations::{embed_migrations, EmbeddedMigrations, MigrationHarness};
-
-pub const MIGRATIONS: EmbeddedMigrations = embed_migrations!("../migrations");
+use database_schema::diesel::prelude::*;
+use database_schema::diesel_async::RunQueryDsl;
 
 const MAX_NOTIFICATION_AGE: i64 = 30;
 const MAX_USER_NOTIFICATIONS: usize = 100;
 
-const NSFW_LABELS: [&str; 7] = ["!hide", "!warn", "!no-unauthenticated", "porn", "sexual", "graphic-media", "nudity"];
+const NSFW_LABELS: [&str; 7] = [
+    "!hide",
+    "!warn",
+    "!no-unauthenticated",
+    "porn",
+    "sexual",
+    "graphic-media",
+    "nudity",
+];
 
 const OLDEST_POST_AGE: chrono::Duration = chrono::Duration::hours(2);
 lazy_static! {
@@ -487,9 +487,14 @@ async fn load_post_image(
     }
     let raw_json_response: Value = response.json().await?;
 
-    let labels = raw_json_response["posts"][0]["labels"].as_array().map(|labels| {
-        labels.iter().map(|label| label["val"].as_str().unwrap_or("")).collect::<Vec<&str>>()
-    });
+    let labels = raw_json_response["posts"][0]["labels"]
+        .as_array()
+        .map(|labels| {
+            labels
+                .iter()
+                .map(|label| label["val"].as_str().unwrap_or(""))
+                .collect::<Vec<&str>>()
+        });
     if let Some(labels) = labels {
         for label in labels {
             if NSFW_LABELS.contains(&label) {
@@ -597,7 +602,7 @@ async fn process_post(
     user_settings: SharedUserSettings,
     fcm_client: Option<Arc<FcmClient>>,
     cache: Store,
-    pg: Option<Pool<AsyncPgConnection>>,
+    pg: Option<DBPool>,
 ) {
     info!("Processing post: {:?}", post.post_id());
     let poster_did = post.did.clone();
@@ -896,7 +901,7 @@ async fn update_db_notifications(
     body: String,
     image: Option<String>,
     url: String,
-    pg_pool: Pool<AsyncPgConnection>,
+    pg_pool: DBPool,
 ) {
     let pool = pg_pool.get().await;
     if pool.is_err() {
@@ -974,7 +979,7 @@ async fn send_notification(
     body: String,
     image: Option<String>,
     url: String,
-    pg: Option<Pool<AsyncPgConnection>>,
+    pg: Option<DBPool>,
 ) {
     info!("Sending notification to {} users", fcm_recipients.len());
     info!("Title: {}", title);
@@ -1050,7 +1055,7 @@ async fn listen_to_posts(
     user_settings: SharedUserSettings,
     fcm_client: Arc<FcmClient>,
     cache: Store,
-    pg: Option<Pool<AsyncPgConnection>>,
+    pg: Option<DBPool>,
 ) {
     let consumer = posts_stream
         .get_or_create_consumer(
@@ -1225,20 +1230,9 @@ async fn _main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     RECEIVED_MESSAGES_COUNTER.reset();
     NOTIFICATIONS_SENT_COUNTER.reset();
 
-    info!("Getting DB");
-    let pg_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
-    let pg_config = AsyncDieselConnectionManager::<diesel_async::AsyncPgConnection>::new(&pg_url);
-    let pg_pool = Pool::builder(pg_config).build()?;
+    run_migrations()?;
 
-    info!("DB connected");
-
-    info!("Running migrations");
-    {
-        let mut connection = PgConnection::establish(&pg_url)
-            .unwrap_or_else(|_| panic!("Error connecting to {}", pg_url));
-        connection.run_pending_migrations(MIGRATIONS)?;
-    }
-    info!("Migrations complete");
+    let pg_pool = get_pool()?;
 
     let mut nats_host = std::env::var("NATS_HOST").unwrap_or("localhost".to_string());
     if !nats_host.contains(':') {
@@ -1397,7 +1391,6 @@ mod tests {
         let image_url = load_post_image(nsfw_uri, None).await.unwrap();
         println!("{:?}", image_url);
         assert!(image_url.is_none());
-        
     }
 
     #[test]
