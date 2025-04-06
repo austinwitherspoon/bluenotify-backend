@@ -29,5 +29,4 @@ tracing = "0.1.41"
 tracing-loki = "0.2.6"
 tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
 url = "2.5.4"
-user_settings = { path = "../user_settings" }
 yup-oauth2 = "9.0.0"

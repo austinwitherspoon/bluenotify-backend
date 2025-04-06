@@ -2025,7 +2025,6 @@ dependencies = [
  "tracing-loki",
  "tracing-subscriber",
  "url",
- "user_settings",
  "yup-oauth2",
 ]
 
