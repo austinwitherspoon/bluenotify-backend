@@ -271,7 +271,7 @@ async fn listen_to_watched_forever(kv_store: Store, watched_users: SharedWatched
         }
     }
     loop {
-        let mut messages = kv_store.watch("watched_users").await;
+        let messages = kv_store.watch("watched_users").await;
         if messages.is_err() {
             error!("Error watching watched_users");
             tokio::time::sleep(Duration::from_secs(1)).await;
@@ -331,13 +331,12 @@ async fn _main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .await;
 
     let kv_store = nats_js.get_key_value("bluenotify_kv_store").await.unwrap();
-    let kv_store_2 = nats_js.get_key_value("bluenotify_kv_store").await.unwrap();
 
     let shared_watched_users = Arc::new(RwLock::new(WatchedUsers {
         watched_users: HashSet::new(),
     }));
 
-    let shared_kv: Arc<RwLock<Store>> = Arc::new(RwLock::new(kv_store));
+    let shared_kv: Arc<RwLock<Store>> = Arc::new(RwLock::new(kv_store.clone()));
 
     info!("Starting up metrics server on {}", axum_url);
     let axum_app = Router::new()
@@ -353,7 +352,7 @@ async fn _main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         shared_kv.clone(),
     ));
     let watched_copy = shared_watched_users.clone();
-    tasks.spawn(listen_to_watched_forever(kv_store_2, watched_copy));
+    tasks.spawn(listen_to_watched_forever(kv_store, watched_copy));
     tasks.spawn(async move {
         axum::serve(axum_listener, axum_app).await.unwrap();
     });

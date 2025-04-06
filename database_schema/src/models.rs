@@ -1,10 +1,11 @@
 use std::fmt::Display;
 
 use crate::timestamp::SerializableTimestamp;
+use crate::DBPool;
 use diesel::{prelude::*, sql_types::Nullable};
 use serde::Serialize;
 
-#[derive(Debug, Clone, Copy, diesel_derive_enum::DbEnum)]
+#[derive(Debug, Clone, Copy, diesel_derive_enum::DbEnum, PartialEq, Eq)]
 #[db_enum(
     existing_type_path = "crate::schema::sql_types::PostNotificationType",
     value_style = "camelCase"
@@ -39,7 +40,7 @@ impl Display for NotificationType {
     }
 }
 
-#[derive(Queryable, Selectable, Serialize, Debug)]
+#[derive(Insertable, Debug, Queryable, Identifiable, Selectable, Clone, PartialEq, Eq, Serialize)]
 #[diesel(table_name = crate::schema::notifications)]
 #[diesel(check_for_backend(diesel::pg::Pg))]
 pub struct Notification {
@@ -63,7 +64,7 @@ pub struct NewNotification {
     pub image: Option<String>,
 }
 
-#[derive(Queryable, Selectable, Serialize, Debug)]
+#[derive(Insertable, Debug, Queryable, Identifiable, Selectable, Clone, PartialEq, Eq, Serialize)]
 #[diesel(table_name = crate::schema::users)]
 #[diesel(check_for_backend(diesel::pg::Pg))]
 pub struct User {
@@ -83,7 +84,9 @@ pub struct NewUser {
     pub updated_at: SerializableTimestamp,
 }
 
-#[derive(Insertable, Debug)]
+#[derive(Insertable, Debug, Queryable, Identifiable, Selectable, Clone, PartialEq, Eq)]
+#[diesel(belongs_to(User))]
+#[diesel(primary_key(user_id, account_did))]
 #[diesel(table_name = crate::schema::accounts)]
 #[diesel(check_for_backend(diesel::pg::Pg))]
 pub struct NewUserAccount {
@@ -92,7 +95,9 @@ pub struct NewUserAccount {
     pub created_at: SerializableTimestamp,
 }
 
-#[derive(Insertable, Debug)]
+#[derive(Insertable, Debug, Queryable, Identifiable, Selectable, Clone, PartialEq, Eq)]
+#[diesel(belongs_to(User))]
+#[diesel(primary_key(user_id, user_account_did, following_did))]
 #[diesel(table_name = crate::schema::notification_settings)]
 #[diesel(check_for_backend(diesel::pg::Pg))]
 pub struct UserSetting {
@@ -100,7 +105,7 @@ pub struct UserSetting {
     pub user_account_did: String,
     pub following_did: String,
     pub post_type: Vec<NotificationType>,
-    pub word_allow_list: Option<Vec<Option<String>>>,
-    pub word_block_list: Option<Vec<Option<String>>>,
+    pub word_allow_list: Option<Vec<String>>,
+    pub word_block_list: Option<Vec<String>>,
     pub created_at: SerializableTimestamp,
 }

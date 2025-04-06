@@ -4,6 +4,7 @@
 [print_schema]
 file = "database_schema/src/schema.rs"
 custom_type_derives = ["diesel::query_builder::QueryId", "Clone"]
+patch_file = "database_schema/src/schema.patch"
 
 [migrations_directory]
 dir = "./migrations"

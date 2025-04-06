@@ -8,7 +8,7 @@ use diesel::{
 use serde::Serialize;
 
 /// A wrapper around `chrono::NaiveDateTime` that can be serialized to a string by serde
-#[derive(Debug, Clone, Copy, AsExpression, FromSqlRow)]
+#[derive(Debug, Clone, Copy, AsExpression, FromSqlRow, PartialEq, Eq)]
 #[diesel(sql_type = Timestamp)]
 pub struct SerializableTimestamp {
     timestamp: chrono::NaiveDateTime,

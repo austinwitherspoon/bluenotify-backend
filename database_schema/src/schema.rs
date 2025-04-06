@@ -22,9 +22,9 @@ diesel::table! {
         user_id -> Int4,
         user_account_did -> Text,
         following_did -> Text,
-        post_type -> Array<Nullable<PostNotificationType>>,
-        word_allow_list -> Nullable<Array<Nullable<Text>>>,
-        word_block_list -> Nullable<Array<Nullable<Text>>>,
+        post_type -> Array<PostNotificationType>,
+        word_allow_list -> Nullable<Array<Text>>,
+        word_block_list -> Nullable<Array<Text>>,
         created_at -> Timestamp,
     }
 }

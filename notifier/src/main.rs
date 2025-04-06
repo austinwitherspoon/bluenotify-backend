@@ -12,18 +12,16 @@ use prometheus::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::runtime::Handle;
-use tokio::sync::RwLock;
 use tokio::task::JoinSet;
 use tokio::time::timeout;
 use tracing::{debug, error, info, span, warn, Instrument, Level};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::Layer;
-use user_settings::{AllUserSettings, UserSettingsMap};
 mod fcm;
 use crate::fcm::FcmClient;
 use database_schema::{get_pool, notifications, run_migrations, DBPool, NewNotification};
@@ -72,8 +70,6 @@ lazy_static! {
     )
     .unwrap();
 }
-
-type SharedUserSettings = Arc<RwLock<AllUserSettings>>;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 struct JetstreamPost {
@@ -516,43 +512,40 @@ async fn load_post_image(
 
 async fn check_possible_recipient(
     possible_recipient: String,
-    poster_did: String,
-    user_settings: SharedUserSettings,
+    user_settings: database_schema::models::UserSetting,
     post_type: PostType,
     post: &JetstreamPost,
     retry: RetryPolicy,
     client: Option<reqwest::Client>,
     cache: Store,
 ) -> (String, bool) {
-    let user_settings = {
-        let all_settings = user_settings.read().await;
-        if !all_settings.settings.contains_key(&possible_recipient) {
-            return (possible_recipient, false);
-        }
-        all_settings
-            .settings
-            .get(&possible_recipient)
-            .unwrap()
-            .clone()
-    };
-
-    let wanted_post_types = &user_settings.settings.get(&poster_did).unwrap().post_types;
-
     match post_type {
         PostType::Post | PostType::Quote => {
-            if !wanted_post_types.contains(&user_settings::PostType::Post) {
+            if !user_settings
+                .post_type
+                .contains(&database_schema::models::NotificationType::Post)
+            {
                 return (possible_recipient, false);
             }
         }
         PostType::Repost => {
-            if !wanted_post_types.contains(&user_settings::PostType::Repost) {
+            if !user_settings
+                .post_type
+                .contains(&database_schema::models::NotificationType::Repost)
+            {
                 return (possible_recipient, false);
             }
         }
         PostType::Reply => {
-            if wanted_post_types.contains(&user_settings::PostType::Reply) {
+            if user_settings
+                .post_type
+                .contains(&database_schema::models::NotificationType::Reply)
+            {
                 return (possible_recipient, true);
-            } else if wanted_post_types.contains(&user_settings::PostType::ReplyToFriend) {
+            } else if user_settings
+                .post_type
+                .contains(&database_schema::models::NotificationType::ReplyToFriend)
+            {
                 let parent_poster_did = match &post.commit.record {
                     Record::Post(record) => {
                         let uri = record.reply.as_ref().unwrap().parent.uri.clone();
@@ -560,31 +553,30 @@ async fn check_possible_recipient(
                     }
                     _ => return (possible_recipient, false),
                 };
-                let mut following = HashSet::new();
                 debug!(
                     "Checking if {:?} follows {:?}",
                     possible_recipient, parent_poster_did
                 );
-                for bluesky_account_did in user_settings.accounts.iter() {
-                    let new_following = retry
-                        .retry(|| {
-                            timeout(
-                                Duration::from_secs(60),
-                                get_following(
-                                    bluesky_account_did,
-                                    client.clone(),
-                                    Some(cache.clone()),
-                                ),
-                            )
-                        })
-                        .await;
-                    if new_following.is_err() {
-                        error!("Timed out getting following for {:?}!", bluesky_account_did);
-                        continue;
-                    }
-                    let new_following = new_following.unwrap().unwrap_or_default();
-                    following.extend(new_following);
+                let following = retry
+                    .retry(|| {
+                        timeout(
+                            Duration::from_secs(60),
+                            get_following(
+                                user_settings.user_account_did.as_str(),
+                                client.clone(),
+                                Some(cache.clone()),
+                            ),
+                        )
+                    })
+                    .await;
+                if following.is_err() {
+                    error!(
+                        "Timed out getting following for {:?}!",
+                        user_settings.user_account_did
+                    );
+                    return (possible_recipient, false);
                 }
+                let following = following.unwrap().unwrap_or_default();
                 if !following.contains(&parent_poster_did) {
                     return (possible_recipient, false);
                 }
@@ -596,13 +588,47 @@ async fn check_possible_recipient(
     (possible_recipient, true)
 }
 
+async fn get_all_possible_recipients(
+    poster_did: String,
+    post_type: PostType,
+    pg: DBPool,
+) -> Result<
+    Vec<(String, database_schema::models::UserSetting)>,
+    Box<dyn std::error::Error + Send + Sync>,
+> {
+    let mut con = pg.get().await?;
+
+    let db_post_type = match post_type {
+        PostType::Post => vec![database_schema::models::NotificationType::Post],
+        PostType::Quote => vec![database_schema::models::NotificationType::Post],
+        PostType::Repost => vec![database_schema::models::NotificationType::Repost],
+        PostType::Reply => vec![
+            database_schema::models::NotificationType::Reply,
+            database_schema::models::NotificationType::ReplyToFriend,
+        ],
+    };
+
+    use database_schema::schema::{notification_settings, users};
+
+    Ok(notification_settings::table
+        .inner_join(users::table)
+        .filter(notification_settings::following_did.eq(poster_did))
+        .filter(notification_settings::post_type.overlaps_with(db_post_type))
+        .filter(users::deleted_at.is_null())
+        .select((
+            users::fcm_token,
+            <database_schema::models::UserSetting>::as_select(),
+        ))
+        .load::<(String, database_schema::models::UserSetting)>(&mut con)
+        .await?)
+}
+
 async fn process_post(
     post: JetstreamPost,
     nats_message: Option<Message>,
-    user_settings: SharedUserSettings,
     fcm_client: Option<Arc<FcmClient>>,
     cache: Store,
-    pg: Option<DBPool>,
+    pg: DBPool,
 ) {
     info!("Processing post: {:?}", post.post_id());
     let poster_did = post.did.clone();
@@ -637,31 +663,38 @@ async fn process_post(
 
     // check if this post has any interested listeners BEFORE downloading anything else
     let fcm_recipients: HashSet<String> = {
-        let mut fcm_recipients = {
-            user_settings
-                .read()
-                .await
-                .fcm_tokens_by_watched
-                .get(&poster_did)
-                .cloned()
-                .unwrap_or_default()
-        };
+        let possible_recipients =
+            get_all_possible_recipients(poster_did.clone(), post_type.clone(), pg.clone()).await;
+
+        debug!(
+            "Possible recipients for {:?}: {:?}",
+            poster_did,
+            possible_recipients
+        );
+
+        if possible_recipients.is_err() {
+            error!(
+                "Error getting possible recipients: {:?}",
+                possible_recipients
+            );
+            return;
+        }
+
+        let possible_recipients = possible_recipients.unwrap();
 
         let mut task_group = tokio::task::JoinSet::new();
-        for possible_recipient in fcm_recipients.iter() {
-            let user_settings = user_settings.clone();
-            let poster_did = poster_did.clone();
+        for (possible_recipient, settings) in possible_recipients.iter() {
             let post_type = post_type.clone();
             let post = post.clone();
             let possible_recipient = possible_recipient.clone();
             let retry = retry.clone();
             let client = client.clone();
             let cache = cache.clone();
+            let settings = settings.clone();
             task_group.spawn(async move {
                 check_possible_recipient(
                     possible_recipient,
-                    poster_did,
-                    user_settings,
+                    settings.clone(),
                     post_type,
                     &post,
                     retry.clone(),
@@ -672,14 +705,16 @@ async fn process_post(
             });
         }
 
+        let mut results = HashSet::new();
+
         while let Some(result) = task_group.join_next().await {
             let (recipient, should_notify) = result.unwrap();
-            if !should_notify {
-                fcm_recipients.remove(&recipient);
+            if should_notify {
+                results.insert(recipient);
             }
         }
 
-        fcm_recipients
+        results
     };
 
     if fcm_recipients.is_empty() {
@@ -979,7 +1014,7 @@ async fn send_notification(
     body: String,
     image: Option<String>,
     url: String,
-    pg: Option<DBPool>,
+    pg: DBPool,
 ) {
     info!("Sending notification to {} users", fcm_recipients.len());
     info!("Title: {}", title);
@@ -993,14 +1028,15 @@ async fn send_notification(
         warn!("Mock mode, will not send notification!");
         return;
     }
-    if let Some(pg_pool) = pg {
+    {
         let fcm_recipients = fcm_recipients.clone();
         let title = title.clone();
         let body = body.clone();
         let image = image.clone();
         let url = url.clone();
+        let pg = pg.clone();
         tokio::spawn(async move {
-            update_db_notifications(fcm_recipients, title, body, image, url, pg_pool).await;
+            update_db_notifications(fcm_recipients, title, body, image, url, pg).await;
         });
     }
     let fcm_client = fcm_client.unwrap();
@@ -1042,20 +1078,46 @@ async fn send_notification(
         message["message"]["notification"]["image"] = Value::String(image);
     }
     for fcm_token in fcm_recipients {
-        message["message"]["token"] = Value::String(fcm_token);
+        message["message"]["token"] = Value::String(fcm_token.clone());
         let response = fcm_client.send(message.clone()).await;
-        if response.is_err() {
-            warn!("Error sending notification: {:?}", response);
+        match response {
+            Ok(_) => {
+                info!("Notification sent successfully to {:?}", fcm_token);
+            }
+            Err(e) => {
+                match e {
+                    fcm::FcmError::ResponseError(e) => {
+                        if e.error.code == 404 {
+                            warn!("FCM token not found, user deleted. Removing from database.");
+                            let mut con = pg.get().await.unwrap();
+                            let result = diesel::delete(
+                                database_schema::schema::users::table.filter(
+                                    database_schema::schema::users::dsl::fcm_token.eq(fcm_token.clone()),
+                                ),
+                            )
+                            .execute(&mut con)
+                            .await;
+                            if result.is_err() {
+                                error!("Error deleting notifications: {:?}", result);
+                            }
+                        } else {
+                            error!("Error sending notification: {:?}", e);
+                        }
+                    }
+                    _ => {
+                        error!("Error sending notification: {:?}", e);
+                    }
+                }
+            }
         }
     }
 }
 
 async fn listen_to_posts(
     posts_stream: Stream,
-    user_settings: SharedUserSettings,
     fcm_client: Arc<FcmClient>,
     cache: Store,
-    pg: Option<DBPool>,
+    pg: DBPool,
 ) {
     let consumer = posts_stream
         .get_or_create_consumer(
@@ -1104,7 +1166,6 @@ async fn listen_to_posts(
             }
             let post_id = post.post_id();
             tokio::spawn({
-                let user_settings = user_settings.clone();
                 let fcm_client = fcm_client.clone();
                 let cache = cache.clone();
                 let pg = pg.clone();
@@ -1112,19 +1173,8 @@ async fn listen_to_posts(
                 async move {
                     let result = timeout(
                         Duration::from_secs(60 * 5),
-                        process_post(
-                            post,
-                            Some(message),
-                            user_settings,
-                            Some(fcm_client),
-                            cache,
-                            pg,
-                        )
-                        .instrument(span!(
-                            Level::INFO,
-                            "process",
-                            post_id = post_id.as_str()
-                        )),
+                        process_post(post, Some(message), Some(fcm_client), cache, pg)
+                            .instrument(span!(Level::INFO, "process", post_id = post_id.as_str())),
                     )
                     .await;
                     if result.is_err() {
@@ -1134,56 +1184,6 @@ async fn listen_to_posts(
             });
 
             TOKIO_ALIVE_TASKS.set(metrics.num_alive_tasks() as i64);
-        }
-    }
-}
-
-async fn initial_load_user_settings(kv_store: &Store, current_settings: SharedUserSettings) {
-    let value = kv_store.get("user_settings").await.unwrap();
-    if value.is_none() {
-        return;
-    }
-    let value = value.unwrap();
-    let new_settings: Result<UserSettingsMap, _> = serde_json::from_slice(value.as_ref());
-    if new_settings.is_err() {
-        error!("Error deserializing user settings: {:?}", new_settings);
-        return;
-    }
-    let mut current_settings = current_settings.write().await;
-    current_settings.settings.clear();
-    current_settings.settings.extend(new_settings.unwrap());
-    current_settings.rebuild_cache();
-    info!(
-        "Loaded settings. Length: {:?}",
-        current_settings.settings.len()
-    );
-}
-
-async fn listen_to_user_settings(kv_store: Store, current_settings: SharedUserSettings) {
-    loop {
-        let messages = kv_store.watch("user_settings").await;
-        if messages.is_err() {
-            error!("Error watching watched_users");
-            tokio::time::sleep(Duration::from_secs(1)).await;
-            continue;
-        }
-        let mut messages = messages.unwrap();
-        while let Ok(Some(message)) = messages.try_next().await {
-            let new_settings: Result<UserSettingsMap, _> =
-                serde_json::from_slice(message.value.as_ref());
-            if new_settings.is_err() {
-                error!("Error deserializing user settings: {:?}", new_settings);
-                continue;
-            }
-            info!("Received new settings!");
-            let mut current_settings = current_settings.write().await;
-            current_settings.settings.clear();
-            current_settings.settings.extend(new_settings.unwrap());
-            current_settings.rebuild_cache();
-            info!(
-                "Updated settings. Length: {:?}",
-                current_settings.settings.len()
-            );
         }
     }
 }
@@ -1257,7 +1257,6 @@ async fn _main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             ..Default::default()
         })
         .await;
-    let kv_store = nats_js.get_key_value("bluenotify_kv_store").await.unwrap();
 
     // Get cache
     _ = nats_js
@@ -1269,11 +1268,6 @@ async fn _main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         })
         .await;
     let cache = nats_js.get_key_value("bluenotify_cache").await.unwrap();
-
-    let user_settings: SharedUserSettings =
-        Arc::new(RwLock::new(AllUserSettings::new(HashMap::new())));
-
-    initial_load_user_settings(&kv_store, user_settings.clone()).await;
 
     let posts_stream = nats_js.get_stream("watched_posts").await?;
 
@@ -1287,20 +1281,8 @@ async fn _main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     tasks.spawn(async move {
         axum::serve(axum_listener, axum_app).await.unwrap();
     });
-    let shared_settings = user_settings.clone();
     tasks.spawn(async move {
-        listen_to_posts(
-            posts_stream,
-            shared_settings,
-            fcm_client.clone(),
-            cache,
-            Some(pg_pool),
-        )
-        .await;
-    });
-    let shared_settings = user_settings.clone();
-    tasks.spawn(async move {
-        listen_to_user_settings(kv_store, shared_settings).await;
+        listen_to_posts(posts_stream, fcm_client.clone(), cache, pg_pool).await;
     });
 
     tasks.join_all().await;

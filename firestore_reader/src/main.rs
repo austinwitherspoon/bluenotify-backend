@@ -1,15 +1,10 @@
-use axum::{extract::State, routing::get, Router};
+use axum::{routing::get, Router};
 use core::panic;
 use firestore::*;
 use futures::StreamExt;
 use lazy_static::lazy_static;
 use prometheus::{self, register_int_gauge, Encoder, IntGauge, TextEncoder};
-use std::{
-    collections::{HashMap, HashSet},
-    sync::Arc,
-    vec,
-};
-use tokio::sync::RwLock;
+use std::vec;
 use tracing::{debug, error, info};
 
 use database_schema::diesel_async::RunQueryDsl;
@@ -32,16 +27,9 @@ lazy_static! {
     .unwrap();
 }
 
-type SharedState = Arc<RwLock<Settings>>;
-
-struct Settings {
-    all_settings: HashMap<String, UserSettings>,
-    kv: async_nats::jetstream::kv::Store,
-    db_pool: DBPool,
-}
-
 async fn send_user_settings_to_db(
     db_pool: &DBPool,
+    kv_store: &async_nats::jetstream::kv::Store,
     settings: &UserSettings,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut conn = db_pool.get().await?;
@@ -153,11 +141,14 @@ async fn send_user_settings_to_db(
         .execute(&mut conn)
         .await?;
 
+    update_watched_users(&db_pool, &kv_store).await?;
+
     Ok(())
 }
 
 async fn remove_user_settings_from_db(
     db_pool: &DBPool,
+    kv_store: &async_nats::jetstream::kv::Store,
     id: &str,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut conn = db_pool.get().await?;
@@ -168,6 +159,41 @@ async fn remove_user_settings_from_db(
     .set(database_schema::schema::users::dsl::deleted_at.eq(chrono::Utc::now().naive_utc()))
     .execute(&mut conn)
     .await?;
+    update_watched_users(&db_pool, &kv_store).await?;
+    Ok(())
+}
+
+async fn update_watched_users(
+    db_pool: &DBPool,
+    kv_store: &async_nats::jetstream::kv::Store,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let mut conn = db_pool.get().await?;
+    let users_count = database_schema::schema::users::table
+        .filter(database_schema::schema::users::dsl::deleted_at.is_null())
+        .count()
+        .get_result::<i64>(&mut conn)
+        .await?;
+    SUBSCRIBED_USERS_COUNTER.set(users_count);
+
+    //SELECT DISTINCT ON (following_did) * FROM notification_settings ORDER BY following_did
+    let watched_users = database_schema::schema::notification_settings::table
+        .select(database_schema::schema::notification_settings::dsl::following_did)
+        .distinct()
+        .load::<String>(&mut conn)
+        .await?;
+
+    WATCHED_USERS.set(watched_users.len() as i64);
+
+    // Store the watched users in the kv store
+    let watched_users_json = serde_json::to_string(&watched_users).unwrap();
+    let result = kv_store
+        .put("watched_users", watched_users_json.into())
+        .await;
+    if let Err(e) = result {
+        error!("Error storing watched users in kv store: {e:?}");
+    } else {
+        info!("Watched users stored in kv store successfully.");
+    }
     Ok(())
 }
 
@@ -178,33 +204,12 @@ pub fn config_env_var(name: &str) -> Result<String, String> {
     std::env::var(name).map_err(|e| format!("{}: {}", name, e))
 }
 
-fn watched_users(settings: &HashMap<String, UserSettings>) -> HashSet<String> {
-    let mut watched_users = HashSet::new();
-    for (_, setting) in settings.iter() {
-        for (account, _) in setting.settings.iter() {
-            watched_users.insert(account.clone());
-        }
-    }
-    watched_users
-}
-
 async fn metrics() -> String {
     let mut buffer = vec![];
     let encoder = TextEncoder::new();
     let metric_families = prometheus::gather();
     encoder.encode(&metric_families, &mut buffer).unwrap();
     String::from_utf8(buffer).unwrap()
-}
-
-async fn get_settings(state: State<SharedState>) -> String {
-    let settings = &state.read().await.all_settings;
-    serde_json::to_string(&settings).unwrap()
-}
-
-async fn get_watched_users(state: State<SharedState>) -> String {
-    let settings = &state.read().await.all_settings;
-    let watched_users = watched_users(settings);
-    serde_json::to_string(&watched_users).unwrap()
 }
 
 async fn _main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -240,12 +245,6 @@ async fn _main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .await
         .unwrap();
 
-    let state = Arc::new(RwLock::new(Settings {
-        kv: kv_store,
-        all_settings: HashMap::new(),
-        db_pool: db_pool.clone(),
-    }));
-
     let collection_name = config_env_var("SETTINGS_COLLECTION")?;
 
     let db = FirestoreDb::new(&config_env_var("GOOGLE_CLOUD_PROJECT")?)
@@ -264,45 +263,21 @@ async fn _main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     {
         info!("Deserializing settings from Firestore...");
-        let mut state = state.write().await;
         info!("Deserialized settings: {all_settings:?}");
-        for setting in all_settings {
+        for setting in &all_settings {
             info!("Deserialized settings: {setting:?}");
             let setting_copy = setting.clone();
-            let result = send_user_settings_to_db(&state.db_pool, &setting_copy).await;
+            let result =
+                send_user_settings_to_db(&db_pool.clone(), &kv_store.clone(), &setting_copy).await;
             if let Err(e) = result {
                 panic!("Error sending settings to DB: {e:?}",);
             } else {
                 info!("Settings sent to DB successfully.");
             }
-            state
-                .all_settings
-                .insert(setting.fcm_token.clone(), setting);
         }
     }
 
-    println!(
-        "Initial settings: len {:?}",
-        &state.read().await.all_settings.len()
-    );
-
-    let current_settings = serde_json::to_string(&state.read().await.all_settings).unwrap();
-    let current_watched_users =
-        serde_json::to_string(&watched_users(&state.read().await.all_settings)).unwrap();
-    SUBSCRIBED_USERS_COUNTER.set(state.read().await.all_settings.len() as i64);
-    WATCHED_USERS.set(watched_users(&state.read().await.all_settings).len() as i64);
-    _ = state
-        .write()
-        .await
-        .kv
-        .put("user_settings", current_settings.into())
-        .await;
-    _ = state
-        .write()
-        .await
-        .kv
-        .put("watched_users", current_watched_users.into())
-        .await;
+    println!("Initial settings: len {:?}", all_settings.len());
 
     let mut listener = db
         .create_listener(FirestoreTempFilesListenStateStorage::new())
@@ -316,9 +291,9 @@ async fn _main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     listener
         .start({
-            let state = Arc::clone(&state);
             move |event| {
-                let state = Arc::clone(&state);
+                let db_pool = db_pool.clone();
+                let kv_store = kv_store.clone();
                 async move {
                     match event {
                         FirestoreListenEvent::DocumentChange(ref doc_change) => {
@@ -327,21 +302,10 @@ async fn _main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                                 match result {
                                     Ok(settings) => {
                                         debug!("Deserialized settings: {settings:?}");
-                                        let mut state = state.write().await;
-                                        let previous_settings =
-                                            state.all_settings.get(&settings.fcm_token);
-                                        if let Some(previous_settings) = previous_settings {
-                                            if previous_settings == &settings {
-                                                info!("No changes in settings.");
-                                                return Ok(());
-                                            }
-                                        }
                                         let settings_copy = (&settings).clone();
-                                        state
-                                            .all_settings
-                                            .insert(settings.fcm_token.clone(), settings);
                                         let result = send_user_settings_to_db(
-                                            &state.db_pool,
+                                            &db_pool.clone(),
+                                            &kv_store.clone(),
                                             &settings_copy,
                                         )
                                         .await;
@@ -350,23 +314,6 @@ async fn _main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                                         } else {
                                             info!("Settings sent to DB successfully.");
                                         }
-
-                                        let watched_users = watched_users(&state.all_settings);
-                                        let watched_users_json =
-                                            serde_json::to_string(&watched_users).unwrap();
-                                        let all_users_json =
-                                            serde_json::to_string(&state.all_settings).unwrap();
-                                        WATCHED_USERS.set(watched_users.len() as i64);
-                                        SUBSCRIBED_USERS_COUNTER
-                                            .set(state.all_settings.len() as i64);
-                                        _ = state
-                                            .kv
-                                            .put("user_settings", all_users_json.into())
-                                            .await;
-                                        _ = state
-                                            .kv
-                                            .put("watched_users", watched_users_json.into())
-                                            .await;
                                     }
                                     Err(e) => {
                                         error!("Error deserializing settings: {e:?}");
@@ -376,26 +323,18 @@ async fn _main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                         }
                         FirestoreListenEvent::DocumentDelete(ref doc_delete) => {
                             debug!("Doc deleted: {doc_delete:?}");
-                            let mut state = state.write().await;
                             let id = doc_delete.document.split('/').last().unwrap().to_string();
-                            state.all_settings.remove(&id);
-                            let result = remove_user_settings_from_db(&state.db_pool, &id).await;
+                            let result = remove_user_settings_from_db(
+                                &db_pool.clone(),
+                                &kv_store.clone(),
+                                &id,
+                            )
+                            .await;
                             if let Err(e) = result {
                                 error!("Error removing settings from DB: {e:?}");
                             } else {
                                 info!("Settings removed from DB successfully.");
                             }
-                            let watched_users = watched_users(&state.all_settings);
-                            let watched_users_json = serde_json::to_string(&watched_users).unwrap();
-                            let all_users_json =
-                                serde_json::to_string(&state.all_settings).unwrap();
-                            WATCHED_USERS.set(watched_users.len() as i64);
-                            SUBSCRIBED_USERS_COUNTER.set(state.all_settings.len() as i64);
-                            _ = state.kv.put("user_settings", all_users_json.into()).await;
-                            _ = state
-                                .kv
-                                .put("watched_users", watched_users_json.into())
-                                .await;
                         }
                         _ => {
                             info!("Received an unknown listen response event to handle: {event:?}");
@@ -410,10 +349,7 @@ async fn _main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     let axum_app = Router::new()
         .route("/", get(|| async { "Server online." }))
-        .route("/metrics", get(metrics))
-        .route("/settings", get(get_settings))
-        .route("/watched_users", get(get_watched_users))
-        .with_state(Arc::clone(&state));
+        .route("/metrics", get(metrics));
 
     info!("HTTP server listening on {}", axum_url);
     let axum_listener = tokio::net::TcpListener::bind(axum_url).await.unwrap();

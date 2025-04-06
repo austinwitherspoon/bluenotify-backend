@@ -5,25 +5,21 @@ WORKDIR /app
 RUN USER=root cargo new --bin notifier
 RUN USER=root cargo new --bin bluesky_utils
 RUN USER=root cargo new --bin database_schema
-RUN USER=root cargo new --bin user_settings
 
 WORKDIR /app/notifier
 
 COPY ./notifier/Cargo.toml /app/notifier/Cargo.toml
 COPY ./bluesky_utils/Cargo.toml /app/bluesky_utils/Cargo.toml
 COPY ./database_schema/Cargo.toml /app/database_schema/Cargo.toml
-COPY ./user_settings/Cargo.toml /app/user_settings/Cargo.toml
 
 RUN cargo build --release
 RUN rm /app/notifier/src/*.rs
 RUN rm /app/bluesky_utils/src/*.rs
 RUN rm /app/database_schema/src/*.rs
-RUN rm /app/user_settings/src/*.rs
 
 ADD ./notifier/. /app/notifier
 ADD ./bluesky_utils/. /app/bluesky_utils
 ADD ./database_schema/. /app/database_schema
-ADD ./user_settings/. /app/user_settings
 ADD ./migrations/. /app/migrations
 
 RUN rm /app/notifier/target/release/deps/notifier*
