@@ -515,10 +515,34 @@ async fn check_possible_recipient(
     user_settings: database_schema::models::UserSetting,
     post_type: PostType,
     post: &JetstreamPost,
+    record: &PostRecord,
     retry: RetryPolicy,
     client: Option<reqwest::Client>,
     cache: Store,
 ) -> (String, bool) {
+    if let Some(allowed_words) = user_settings.word_allow_list {
+        if !allowed_words.is_empty() {
+            let mut found = false;
+            for word in allowed_words.iter() {
+                if record.text.contains(word) {
+                    found = true;
+                    break;
+                }
+            }
+            if !found {
+                return (possible_recipient, false);
+            }
+        }
+    }
+
+    if let Some(blocked_words) = user_settings.word_block_list {
+        for word in blocked_words.iter() {
+            if record.text.contains(word) {
+                return (possible_recipient, false);
+            }
+        }
+    }
+
     match post_type {
         PostType::Post | PostType::Quote => {
             if !user_settings
@@ -632,8 +656,13 @@ async fn process_post(
 ) {
     info!("Processing post: {:?}", post.post_id());
     let poster_did = post.did.clone();
+    let mut source_post = post.clone();
 
     let client = reqwest::Client::new();
+
+    let retry = RetryPolicy::fixed(Duration::from_millis(5000))
+        .with_max_retries(10)
+        .with_jitter(false);
 
     let post_type = match &post.commit.record {
         Record::Post(record) => {
@@ -652,12 +681,36 @@ async fn process_post(
                 PostType::Post
             }
         }
-        Record::Repost(_) => PostType::Repost,
+        Record::Repost(record) => {
+            source_post = match retry
+                .retry(|| {
+                    timeout(
+                        Duration::from_secs(60 * 1),
+                        load_bluesky_post(&record.subject.uri, Some(client.clone())),
+                    )
+                })
+                .await
+            {
+                Ok(post) => match post {
+                    Ok(post) => post,
+                    Err(e) => {
+                        error!("Error loading Repost: {:?}", e);
+                        return;
+                    }
+                },
+                Err(e) => {
+                    error!("Loading Repost timed out: {:?}", e);
+                    return;
+                }
+            };
+            PostType::Repost
+        }
     };
 
-    let retry = RetryPolicy::fixed(Duration::from_millis(5000))
-        .with_max_retries(10)
-        .with_jitter(false);
+    let source_post_record = match &source_post.commit.record {
+        Record::Post(record) => record,
+        Record::Repost(_) => return, // Shouldn't happen, can't repost a repost, and we should have loaded the source
+    };
 
     info!("Post type: {:?}", post_type);
 
@@ -668,8 +721,7 @@ async fn process_post(
 
         debug!(
             "Possible recipients for {:?}: {:?}",
-            poster_did,
-            possible_recipients
+            poster_did, possible_recipients
         );
 
         if possible_recipients.is_err() {
@@ -691,12 +743,14 @@ async fn process_post(
             let client = client.clone();
             let cache = cache.clone();
             let settings = settings.clone();
+            let record = source_post_record.clone();
             task_group.spawn(async move {
                 check_possible_recipient(
                     possible_recipient,
                     settings.clone(),
                     post_type,
                     &post,
+                    &record,
                     retry.clone(),
                     Some(client.clone()),
                     cache.clone(),
@@ -747,7 +801,6 @@ async fn process_post(
         .0;
 
     let mut notification_title;
-    let mut source_post = post.clone();
 
     match post_type {
         PostType::Post => {
@@ -755,34 +808,6 @@ async fn process_post(
         }
         PostType::Repost => {
             notification_title = format!("{} reposted:", user_name);
-            match &source_post.commit.record {
-                Record::Repost(record) => {
-                    source_post = match retry
-                        .retry(|| {
-                            timeout(
-                                Duration::from_secs(60 * 1),
-                                load_bluesky_post(&record.subject.uri, Some(client.clone())),
-                            )
-                        })
-                        .await
-                    {
-                        Ok(post) => match post {
-                            Ok(post) => post,
-                            Err(e) => {
-                                error!("Error loading Repost: {:?}", e);
-                                return;
-                            }
-                        },
-                        Err(e) => {
-                            error!("Loading Repost timed out: {:?}", e);
-                            return;
-                        }
-                    };
-                }
-                Record::Post(_) => {
-                    return;
-                }
-            };
         }
         PostType::Quote => {
             notification_title = format!("{} quote posted:", user_name);
@@ -1084,31 +1109,27 @@ async fn send_notification(
             Ok(_) => {
                 info!("Notification sent successfully to {:?}", fcm_token);
             }
-            Err(e) => {
-                match e {
-                    fcm::FcmError::ResponseError(e) => {
-                        if e.error.code == 404 {
-                            warn!("FCM token not found, user deleted. Removing from database.");
-                            let mut con = pg.get().await.unwrap();
-                            let result = diesel::delete(
-                                database_schema::schema::users::table.filter(
-                                    database_schema::schema::users::dsl::fcm_token.eq(fcm_token.clone()),
-                                ),
-                            )
-                            .execute(&mut con)
-                            .await;
-                            if result.is_err() {
-                                error!("Error deleting notifications: {:?}", result);
-                            }
-                        } else {
-                            error!("Error sending notification: {:?}", e);
+            Err(e) => match e {
+                fcm::FcmError::ResponseError(e) => {
+                    if e.error.code == 404 {
+                        warn!("FCM token not found, user deleted. Removing from database.");
+                        let mut con = pg.get().await.unwrap();
+                        let result = diesel::delete(database_schema::schema::users::table.filter(
+                            database_schema::schema::users::dsl::fcm_token.eq(fcm_token.clone()),
+                        ))
+                        .execute(&mut con)
+                        .await;
+                        if result.is_err() {
+                            error!("Error deleting notifications: {:?}", result);
                         }
-                    }
-                    _ => {
+                    } else {
                         error!("Error sending notification: {:?}", e);
                     }
                 }
-            }
+                _ => {
+                    error!("Error sending notification: {:?}", e);
+                }
+            },
         }
     }
 }

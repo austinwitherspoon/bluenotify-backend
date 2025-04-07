@@ -1,5 +1,4 @@
-use async_nats::jetstream::kv::{self, Store};
-use async_nats::jetstream::stream::Stream;
+use async_nats::jetstream::kv::Store;
 use axum::{routing::get, Router};
 use bluesky_utils::parse_created_at;
 use futures::TryStreamExt;
@@ -17,8 +16,8 @@ use std::time::Duration;
 use tokio::sync::RwLock;
 use tokio::task::JoinSet;
 use tokio::time::timeout;
-use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
-use tracing::{error, info};
+use tokio_tungstenite::connect_async;
+use tracing::{error, info, warn};
 
 const URLS: [&str; 4] = [
     "wss://jetstream1.us-west.bsky.network/subscribe",
@@ -130,7 +129,7 @@ async fn connect_and_listen(
 
     info!("Connecting to {}", url);
     let (ws_stream, _) = connect_async(&url).await.expect("Failed to connect");
-    let (mut write, mut read) = ws_stream.split();
+    let (_write, mut read) = ws_stream.split();
     loop {
         let frame = timeout(Duration::from_secs(10), read.next()).await;
         if frame.is_err() {
@@ -371,13 +370,30 @@ fn main() {
                 ..Default::default()
             },
         ));
-    }
+        let result = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(_main());
 
-    _ = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .unwrap()
-        .block_on(_main());
+        if let Err(e) = result {
+            warn!("Shutting down due to error: {:?}", e);
+            std::process::exit(1);
+        }
+        info!("Jetstream reader shutting down.");
+    } else {
+        let result = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(_main());
+
+        if let Err(e) = result {
+            warn!("Shutting down due to error: {:?}", e);
+            std::process::exit(1);
+        }
+        info!("Jetstream reader shutting down.");
+    }
 }
 
 async fn metrics() -> String {

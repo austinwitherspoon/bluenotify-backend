@@ -128,8 +128,8 @@ async fn send_user_settings_to_db(
                         }
                     })
                     .collect(),
-                word_allow_list: Some(Vec::new()),
-                word_block_list: Some(Vec::new()),
+                word_allow_list: None,
+                word_block_list: None,
                 created_at: now,
             };
             notification_settings.push(new_settings);
