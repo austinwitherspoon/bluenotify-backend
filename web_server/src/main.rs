@@ -13,6 +13,8 @@ use diesel::prelude::*;
 use diesel_async::pooled_connection::deadpool::Pool;
 use diesel_async::pooled_connection::AsyncDieselConnectionManager;
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
+use lazy_static::lazy_static;
+use prometheus::{self, register_int_gauge, IntGauge};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -25,8 +27,6 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::Layer;
 use url::Url;
-use lazy_static::lazy_static;
-use prometheus::{self, register_int_gauge, IntGauge};
 
 mod json;
 use json::UserSettings;
@@ -66,9 +66,7 @@ async fn get_or_create_user(
         .first::<User>(&mut conn)
         .await;
     match existing_user {
-        Ok(user) => {
-            Ok(user)
-        }
+        Ok(user) => Ok(user),
         Err(diesel::result::Error::NotFound) => {
             let user = diesel::insert_into(users::table)
                 .values(new_user)
@@ -79,7 +77,10 @@ async fn get_or_create_user(
             Ok(user)
         }
         Err(error) => {
-            error!("Error checking for existing user {}: {:?}", fcm_token, error);
+            error!(
+                "Error checking for existing user {}: {:?}",
+                fcm_token, error
+            );
             Err(StatusCode::INTERNAL_SERVER_ERROR)
         }
     }
@@ -87,7 +88,7 @@ async fn get_or_create_user(
 
 #[axum::debug_handler]
 async fn get_notifications(
-    State(AxumState{pool, ..}): State<AxumState>,
+    State(AxumState { pool, .. }): State<AxumState>,
     Path(fcm_token): Path<String>,
 ) -> Result<String, StatusCode> {
     info!("Getting notifications for user: {}", fcm_token);
@@ -114,7 +115,7 @@ async fn get_notifications(
 
 #[axum::debug_handler]
 async fn clear_notifications(
-    State(AxumState{pool, ..}): State<AxumState>,
+    State(AxumState { pool, .. }): State<AxumState>,
     Path(fcm_token): Path<String>,
 ) -> Result<String, StatusCode> {
     info!("Clearing notifications for user: {}", fcm_token);
@@ -133,7 +134,7 @@ async fn clear_notifications(
 
 #[axum::debug_handler]
 async fn delete_notification(
-    State(AxumState{pool, ..}): State<AxumState>,
+    State(AxumState { pool, .. }): State<AxumState>,
     Path((fcm_token, notification_id)): Path<(String, i32)>,
 ) -> Result<String, StatusCode> {
     info!(
@@ -156,7 +157,7 @@ async fn delete_notification(
 #[axum::debug_handler]
 /// Update the entire settings bundle for a user in one go
 async fn update_settings(
-    State(AxumState{pool, kv_store}): State<AxumState>,
+    State(AxumState { pool, kv_store }): State<AxumState>,
     Path(fcm_token): Path<String>,
     Json(payload): Json<UserSettings>,
 ) -> Result<String, StatusCode> {
@@ -185,7 +186,7 @@ async fn update_settings(
             .await;
 
         match existing_account {
-            Ok(_existing_account) => {},
+            Ok(_existing_account) => {}
             Err(_) => {
                 let new_account = UserAccount {
                     user_id: user.id,
@@ -204,22 +205,26 @@ async fn update_settings(
     diesel::delete(
         accounts::table
             .filter(accounts::user_id.eq(&user.id))
-            .filter(accounts::account_did.ne_all(
-                payload
-                    .accounts
-                    .iter()
-                    .map(|account| account.account_did.clone())
-                    .collect::<Vec<String>>(),
-            )),
+            .filter(
+                accounts::account_did.ne_all(
+                    payload
+                        .accounts
+                        .iter()
+                        .map(|account| account.account_did.clone())
+                        .collect::<Vec<String>>(),
+                ),
+            ),
     )
     .execute(&mut conn)
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    diesel::delete(notification_settings::table.filter(notification_settings::user_id.eq(&user.id)))
-        .execute(&mut conn)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    diesel::delete(
+        notification_settings::table.filter(notification_settings::user_id.eq(&user.id)),
+    )
+    .execute(&mut conn)
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     for setting in payload.notification_settings {
         let now = chrono::Utc::now().naive_utc();
@@ -254,7 +259,33 @@ async fn update_settings(
 
     if let Err(e) = update_watched_users(&mut conn, &kv_store).await {
         error!("Error updating watched users: {:?}", e);
-        return Err(StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    Ok("Success".to_string())
+}
+
+#[axum::debug_handler]
+async fn delete_settings(
+    State(AxumState { pool, kv_store }): State<AxumState>,
+    Path(fcm_token): Path<String>,
+) -> Result<String, StatusCode> {
+    info!("Deleting settings for user: {}", fcm_token);
+    let mut conn = pool
+        .get()
+        .await
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+
+    let user = get_or_create_user(&mut conn, fcm_token.clone()).await?;
+
+    diesel::delete(
+        notification_settings::table.filter(notification_settings::user_id.eq(&user.id)),
+    )
+    .execute(&mut conn)
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    if let Err(e) = update_watched_users(&mut conn, &kv_store).await {
+        error!("Error updating watched users: {:?}", e);
     }
 
     Ok("Success".to_string())
@@ -381,6 +412,7 @@ async fn _main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             delete(delete_notification),
         )
         .route("/settings/{fcm_token}", post(update_settings))
+        .route("/settings/{fcm_token}", delete(delete_settings))
         .with_state(AxumState {
             pool: pg_pool.clone(),
             kv_store: kv_store.clone(),
