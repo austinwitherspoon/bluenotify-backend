@@ -4,19 +4,19 @@ use database_schema::diesel_async::{AsyncPgConnection, RunQueryDsl};
 use database_schema::models::{NotificationType, UserAccount, UserSetting};
 use serde::{Deserialize, Serialize};
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct UserSettings {
     pub fcm_token: String,
     pub accounts: Vec<Account>,
     pub notification_settings: Vec<NotificationSetting>,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Account {
     pub account_did: String,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct NotificationSetting {
     pub user_account_did: String,
     pub following_did: String,

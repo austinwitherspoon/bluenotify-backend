@@ -1,5 +1,7 @@
-use axum::extract::{Path, State};
-use axum::http::StatusCode;
+use axum::body::Bytes;
+use axum::extract::{MatchedPath, Path, State};
+use axum::http::{HeaderMap, Request, StatusCode};
+use axum::response::Response;
 use axum::routing::{delete, get, post, Router};
 use axum::Json;
 use axum_prometheus::PrometheusMetricLayer;
@@ -22,7 +24,8 @@ use tokio::net::TcpListener;
 use tokio::task::JoinSet;
 use tower_governor::key_extractor;
 use tower_governor::{governor::GovernorConfigBuilder, GovernorLayer};
-use tracing::{error, info};
+use tower_http::{classify::ServerErrorsFailureClass, trace::TraceLayer};
+use tracing::{debug, error, info, info_span, warn, Span};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::Layer;
@@ -54,6 +57,8 @@ async fn get_or_create_user(
     mut conn: &mut Object<AsyncPgConnection>,
     fcm_token: String,
 ) -> Result<User, StatusCode> {
+    let span = info_span!("get_or_create_user", fcm_token = %fcm_token);
+    let _enter = span.enter();
     info!("Creating user if not exists: {}", fcm_token);
     let now = chrono::Utc::now().naive_utc();
     let new_user = NewUser {
@@ -91,6 +96,8 @@ async fn get_notifications(
     State(AxumState { pool, .. }): State<AxumState>,
     Path(fcm_token): Path<String>,
 ) -> Result<String, StatusCode> {
+    let span = info_span!("get_notifications", fcm_token = %fcm_token);
+    let _enter = span.enter();
     info!("Getting notifications for user: {}", fcm_token);
     let mut conn = pool
         .get()
@@ -118,6 +125,8 @@ async fn clear_notifications(
     State(AxumState { pool, .. }): State<AxumState>,
     Path(fcm_token): Path<String>,
 ) -> Result<String, StatusCode> {
+    let span = info_span!("clear_notifications", fcm_token = %fcm_token);
+    let _enter = span.enter();
     info!("Clearing notifications for user: {}", fcm_token);
     let mut conn = pool
         .get()
@@ -137,10 +146,13 @@ async fn delete_notification(
     State(AxumState { pool, .. }): State<AxumState>,
     Path((fcm_token, notification_id)): Path<(String, i32)>,
 ) -> Result<String, StatusCode> {
+    let span = info_span!("delete_notification", fcm_token = %fcm_token, notification_id = notification_id);
+    let _enter = span.enter();
     info!(
         "deleting notification {} for user: {}",
         notification_id, fcm_token
     );
+
     let mut conn = pool
         .get()
         .await
@@ -161,7 +173,14 @@ async fn update_settings(
     Path(fcm_token): Path<String>,
     Json(payload): Json<UserSettings>,
 ) -> Result<String, StatusCode> {
+
+    let span = info_span!("update_settings", fcm_token = %fcm_token);
+    let _enter = span.enter();
+
     info!("Updating settings for user: {}", fcm_token);
+
+    let mut payload = payload.clone();
+
     let mut conn = pool
         .get()
         .await
@@ -177,7 +196,23 @@ async fn update_settings(
         ))
         .execute(&mut conn)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| {
+            error!("Error updating user: {:?}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    // add any missing accounts from specific settings
+    for setting in (&payload.notification_settings).clone() {
+        if !&payload
+            .accounts
+            .iter()
+            .any(|account| account.account_did == setting.user_account_did)
+        {
+            payload.accounts.push(json::Account {
+                account_did: setting.user_account_did.clone(),
+            });
+        }
+    }
 
     for account in &payload.accounts {
         let existing_account = UserAccount::belonging_to(&user)
@@ -197,7 +232,10 @@ async fn update_settings(
                     .values(new_account)
                     .execute(&mut conn)
                     .await
-                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+                    .map_err(|e| {
+                        error!("Error inserting account {}: {:?}", account.account_did, e);
+                        StatusCode::INTERNAL_SERVER_ERROR
+                    })?;
             }
         }
     }
@@ -217,14 +255,20 @@ async fn update_settings(
     )
     .execute(&mut conn)
     .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    .map_err(|e| {
+        error!("Error deleting accounts: {:?}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
 
     diesel::delete(
         notification_settings::table.filter(notification_settings::user_id.eq(&user.id)),
     )
     .execute(&mut conn)
     .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    .map_err(|e| {
+        error!("Error deleting notification settings: {:?}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
 
     for setting in payload.notification_settings {
         let now = chrono::Utc::now().naive_utc();
@@ -237,6 +281,7 @@ async fn update_settings(
             word_block_list: setting.word_block_list.clone(),
             created_at: now.into(),
         };
+        debug!("Inserting notification setting: {:?}", new_setting);
         diesel::insert_into(notification_settings::table)
             .values(new_setting)
             .on_conflict((
@@ -252,7 +297,10 @@ async fn update_settings(
             ))
             .execute(&mut conn)
             .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            .map_err(|e| {
+                error!("Error inserting notification setting: {:?}", e);
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
     }
 
     info!("Updated settings for user: {}", fcm_token);
@@ -269,6 +317,8 @@ async fn delete_settings(
     State(AxumState { pool, kv_store }): State<AxumState>,
     Path(fcm_token): Path<String>,
 ) -> Result<String, StatusCode> {
+    let span = info_span!("delete_settings", fcm_token = %fcm_token);
+    let _enter = span.enter();
     info!("Deleting settings for user: {}", fcm_token);
     let mut conn = pool
         .get()
@@ -420,7 +470,49 @@ async fn _main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .layer(GovernorLayer {
             config: governor_conf,
         })
-        .layer(prometheus_layer);
+        .layer(prometheus_layer)
+        .layer(
+            TraceLayer::new_for_http()
+                .make_span_with(|request: &Request<_>| {
+                    // Log the matched route's path (with placeholders not filled in).
+                    // Use request.uri() or OriginalUri if you want the real path.
+                    let matched_path = request
+                        .extensions()
+                        .get::<MatchedPath>()
+                        .map(MatchedPath::as_str);
+
+                    info_span!(
+                        "http_request",
+                        method = ?request.method(),
+                        matched_path,
+                        some_other_field = tracing::field::Empty,
+                    )
+                })
+                .on_request(|_request: &Request<_>, _span: &Span| {
+                    info!("Request: {:?}", _request);
+                })
+                .on_response(|_response: &Response, _latency: Duration, _span: &Span| {
+                    // check if the status was not 2xx
+                    if _response.status() != StatusCode::OK {
+                        _span.record("error", "true");
+                        warn!("Error: {:?}", _response);
+                    }
+                })
+                .on_body_chunk(|_chunk: &Bytes, _latency: Duration, _span: &Span| {
+                    // ...
+                })
+                .on_eos(
+                    |_trailers: Option<&HeaderMap>, _stream_duration: Duration, _span: &Span| {
+                        // ...
+                    },
+                )
+                .on_failure(
+                    |_error: ServerErrorsFailureClass, _latency: Duration, _span: &Span| {
+                        _span.record("error", "true");
+                        warn!("Error status: {:?}", _error);
+                    },
+                ),
+        );
 
     let addr = axum_url.parse::<SocketAddr>().unwrap();
     info!("listening on {}", addr);
