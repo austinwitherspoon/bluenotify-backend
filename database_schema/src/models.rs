@@ -1,11 +1,10 @@
 use std::fmt::Display;
 
 use crate::timestamp::SerializableTimestamp;
-use crate::DBPool;
 use diesel::{prelude::*, sql_types::Nullable};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, diesel_derive_enum::DbEnum, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, diesel_derive_enum::DbEnum, PartialEq, Eq)]
 #[db_enum(
     existing_type_path = "crate::schema::sql_types::PostNotificationType",
     value_style = "camelCase"
@@ -84,18 +83,20 @@ pub struct NewUser {
     pub updated_at: SerializableTimestamp,
 }
 
-#[derive(Insertable, Debug, Queryable, Identifiable, Selectable, Clone, PartialEq, Eq)]
+
+#[derive(Insertable, Debug, Queryable, Identifiable, Associations, Selectable, Clone, PartialEq, Eq)]
 #[diesel(belongs_to(User))]
 #[diesel(primary_key(user_id, account_did))]
 #[diesel(table_name = crate::schema::accounts)]
 #[diesel(check_for_backend(diesel::pg::Pg))]
-pub struct NewUserAccount {
+pub struct UserAccount {
     pub user_id: i32,
     pub account_did: String,
     pub created_at: SerializableTimestamp,
 }
 
-#[derive(Insertable, Debug, Queryable, Identifiable, Selectable, Clone, PartialEq, Eq)]
+
+#[derive(Insertable, Debug, Queryable, Identifiable, Associations, Selectable, Clone, PartialEq, Eq)]
 #[diesel(belongs_to(User))]
 #[diesel(primary_key(user_id, user_account_did, following_did))]
 #[diesel(table_name = crate::schema::notification_settings)]

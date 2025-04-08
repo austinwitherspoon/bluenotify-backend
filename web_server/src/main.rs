@@ -1,8 +1,14 @@
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::routing::{delete, get, post, Router};
+use axum::Json;
 use axum_prometheus::PrometheusMetricLayer;
-use database_schema::{notifications, Notification};
+use database_schema::diesel_async::pooled_connection::deadpool::Object;
+use database_schema::timestamp::SerializableTimestamp;
+use database_schema::{
+    accounts, notification_settings, notifications, users, NewUser, Notification, User,
+    UserAccount, UserSetting,
+};
 use diesel::prelude::*;
 use diesel_async::pooled_connection::deadpool::Pool;
 use diesel_async::pooled_connection::AsyncDieselConnectionManager;
@@ -14,24 +20,62 @@ use tokio::net::TcpListener;
 use tokio::task::JoinSet;
 use tower_governor::key_extractor;
 use tower_governor::{governor::GovernorConfigBuilder, GovernorLayer};
-use tracing::{debug, error, info, span, warn, Instrument, Level};
+use tracing::{error, info};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::Layer;
 use url::Url;
 
+mod json;
+use json::UserSettings;
+
+async fn get_or_create_user(
+    mut conn: &mut Object<AsyncPgConnection>,
+    fcm_token: String,
+) -> Result<User, StatusCode> {
+    info!("Creating user if not exists: {}", fcm_token);
+    let now = chrono::Utc::now().naive_utc();
+    let new_user = NewUser {
+        fcm_token: fcm_token.clone(),
+        created_at: now.into(),
+        updated_at: now.into(),
+    };
+    let existing_user = users::table
+        .filter(users::fcm_token.eq(&fcm_token))
+        .first::<User>(&mut conn)
+        .await;
+    match existing_user {
+        Ok(user) => {
+            Ok(user)
+        }
+        Err(diesel::result::Error::NotFound) => {
+            let user = diesel::insert_into(users::table)
+                .values(new_user)
+                .get_result::<User>(&mut conn)
+                .await
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            info!("Created user: {}", fcm_token);
+            Ok(user)
+        }
+        Err(error) => {
+            error!("Error checking for existing user {}: {:?}", fcm_token, error);
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
+}
+
 async fn get_notifications(
     State(pool): State<Pool<AsyncPgConnection>>,
-    Path(user_id): Path<String>,
+    Path(fcm_token): Path<String>,
 ) -> Result<String, StatusCode> {
-    info!("Getting notifications for user: {}", user_id);
+    info!("Getting notifications for user: {}", fcm_token);
     let mut conn = pool
         .get()
         .await
         .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
 
     let results = notifications::table
-        .filter(notifications::user_id.eq(&user_id))
+        .filter(notifications::user_id.eq(&fcm_token))
         .select(Notification::as_select())
         .load(&mut conn)
         .await
@@ -40,7 +84,7 @@ async fn get_notifications(
     info!(
         "Found {} notifications for user: {}",
         results.len(),
-        user_id
+        fcm_token
     );
 
     Ok(serde_json::to_string(&results).unwrap())
@@ -48,15 +92,15 @@ async fn get_notifications(
 
 async fn clear_notifications(
     State(pool): State<Pool<AsyncPgConnection>>,
-    Path(user_id): Path<String>,
+    Path(fcm_token): Path<String>,
 ) -> Result<String, StatusCode> {
-    info!("Clearing notifications for user: {}", user_id);
+    info!("Clearing notifications for user: {}", fcm_token);
     let mut conn = pool
         .get()
         .await
         .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
 
-    diesel::delete(notifications::table.filter(notifications::user_id.eq(&user_id)))
+    diesel::delete(notifications::table.filter(notifications::user_id.eq(&fcm_token)))
         .execute(&mut conn)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -66,11 +110,11 @@ async fn clear_notifications(
 
 async fn delete_notification(
     State(pool): State<Pool<AsyncPgConnection>>,
-    Path((user_id, notification_id)): Path<(String, i32)>,
+    Path((fcm_token, notification_id)): Path<(String, i32)>,
 ) -> Result<String, StatusCode> {
     info!(
         "deleting notification {} for user: {}",
-        notification_id, user_id
+        notification_id, fcm_token
     );
     let mut conn = pool
         .get()
@@ -84,6 +128,89 @@ async fn delete_notification(
 
     Ok("Success".to_string())
 }
+
+#[axum::debug_handler]
+/// Update the entire settings bundle for a user in one go
+async fn update_settings(
+    State(pool): State<Pool<AsyncPgConnection>>,
+    Path(fcm_token): Path<String>,
+    Json(payload): Json<UserSettings>,
+) -> Result<String, StatusCode> {
+    info!("Updating settings for user: {}", fcm_token);
+    let mut conn = pool
+        .get()
+        .await
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+
+    let user = get_or_create_user(&mut conn, fcm_token.clone()).await?;
+    let now: SerializableTimestamp = chrono::Utc::now().naive_utc().into();
+
+    diesel::update(users::table.filter(users::id.eq(&user.id)))
+        .set((
+            users::updated_at.eq(now),
+            users::deleted_at.eq::<Option<SerializableTimestamp>>(None),
+        ))
+        .execute(&mut conn)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    for account in payload.accounts {
+        let existing_account = UserAccount::belonging_to(&user)
+            .filter(accounts::account_did.eq(&account.account_did))
+            .first::<UserAccount>(&mut conn)
+            .await;
+
+        match existing_account {
+            Ok(_existing_account) => {},
+            Err(_) => {
+                let new_account = UserAccount {
+                    user_id: user.id,
+                    account_did: account.account_did,
+                    created_at: now,
+                };
+                diesel::insert_into(accounts::table)
+                    .values(new_account)
+                    .execute(&mut conn)
+                    .await
+                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            }
+        }
+    }
+
+    for setting in payload.notification_settings {
+        let now = chrono::Utc::now().naive_utc();
+        let new_setting = UserSetting {
+            user_id: user.id,
+            user_account_did: setting.user_account_did,
+            following_did: setting.following_did,
+            post_type: setting.post_type.clone(),
+            word_allow_list: setting.word_allow_list.clone(),
+            word_block_list: setting.word_block_list.clone(),
+            created_at: now.into(),
+        };
+        diesel::insert_into(notification_settings::table)
+            .values(new_setting)
+            .on_conflict((
+                notification_settings::user_id,
+                notification_settings::user_account_did,
+                notification_settings::following_did,
+            ))
+            .do_update()
+            .set((
+                notification_settings::post_type.eq(setting.post_type),
+                notification_settings::word_allow_list.eq(setting.word_allow_list),
+                notification_settings::word_block_list.eq(setting.word_block_list),
+            ))
+            .execute(&mut conn)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    }
+
+    info!("Updated settings for user: {}", fcm_token);
+
+    Ok("Success".to_string())
+}
+
 
 async fn _main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let loki_url = std::env::var("LOKI_URL");
@@ -105,7 +232,7 @@ async fn _main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             .init();
 
         tokio::spawn(task);
-        tracing::info!("Web Server starting, loki tracing enabled.");
+        info!("Web Server starting, loki tracing enabled.");
     } else {
         error!("LOKI_URL not set, will not send logs to Loki");
         tracing_subscriber::fmt::init();
@@ -139,15 +266,16 @@ async fn _main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let axum_app = Router::new()
         .route("/", get(|| async { "Web server online." }))
         .route("/metrics", get(|| async move { metric_handle.render() }))
-        .route("/notifications/{user_id}", get(get_notifications))
+        .route("/notifications/{fcm_token}", get(get_notifications))
         .route(
-            "/notifications/{user_id}/clear",
+            "/notifications/{fcm_token}/clear",
             delete(clear_notifications),
         )
         .route(
-            "/notifications/{user_id}/{notification_id}",
+            "/notifications/{fcm_token}/{notification_id}",
             delete(delete_notification),
         )
+        .route("/settings/{fcm_token}", post(update_settings))
         .with_state(pg_pool)
         .layer(GovernorLayer {
             config: governor_conf,
@@ -155,7 +283,7 @@ async fn _main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .layer(prometheus_layer);
 
     let addr = axum_url.parse::<SocketAddr>().unwrap();
-    tracing::debug!("listening on {}", addr);
+    info!("listening on {}", addr);
     let listener = TcpListener::bind(addr).await.unwrap();
 
     let mut tasks: JoinSet<_> = JoinSet::new();
@@ -182,15 +310,24 @@ fn main() {
                 ..Default::default()
             },
         ));
-    }
+        let result = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(_main());
 
-    let result = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .unwrap()
-        .block_on(_main());
+        if let Err(e) = result {
+            error!("Error: {:?}", e);
+        }
+    } else {
+        let result = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(_main());
 
-    if let Err(e) = result {
-        eprintln!("Error: {:?}", e);
+        if let Err(e) = result {
+            eprintln!("Error: {:?}", e);
+        }
     }
 }

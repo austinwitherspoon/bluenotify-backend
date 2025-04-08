@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-axum = "0.8.1"
+axum = { version = "0.8.1", features = ["macros"] }
 chrono = "0.4.39"
 database_schema = { path = "../database_schema" }
 diesel = { version = "2.2.8", features = ["postgres"] }
