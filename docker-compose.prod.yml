@@ -91,6 +91,7 @@ services:
       - LOKI_URL=${LOKI_URL}
       - ENVIRONMENT=${ENVIRONMENT}
       - DATABASE_URL=postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres/${POSTGRES_DB}
+      - NATS_HOST=nats://nats:4222
     restart: unless-stopped
     ports:
       - "8004:8000"

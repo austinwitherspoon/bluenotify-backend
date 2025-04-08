@@ -4,7 +4,9 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+async-nats = "0.38.0"
 axum = { version = "0.8.1", features = ["macros"] }
+axum-prometheus = "0.8.0"
 chrono = "0.4.39"
 database_schema = { path = "../database_schema" }
 diesel = { version = "2.2.8", features = ["postgres"] }
@@ -14,12 +16,12 @@ futures = "0.3.31"
 lazy_static = "1.5.0"
 prometheus = "0.13.4"
 sentry = "0.36.0"
+sentry-tracing = "0.36.0"
 serde = "1.0.217"
 serde_json = "1.0.138"
 tokio = { version = "1.43.0", features = ["full"] }
+tower_governor = { version = "0.7.0" }
 tracing = "0.1.41"
 tracing-loki = "0.2.6"
 tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
 url = "2.5.4"
-tower_governor = { version = "0.7.0" }
-axum-prometheus = "0.8.0"

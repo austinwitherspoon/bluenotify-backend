@@ -4340,6 +4340,7 @@ dependencies = [
 name = "web_server"
 version = "0.1.0"
 dependencies = [
+ "async-nats",
  "axum 0.8.1",
  "axum-prometheus",
  "chrono",
@@ -4351,6 +4352,7 @@ dependencies = [
  "lazy_static",
  "prometheus",
  "sentry",
+ "sentry-tracing",
  "serde",
  "serde_json",
  "tokio",

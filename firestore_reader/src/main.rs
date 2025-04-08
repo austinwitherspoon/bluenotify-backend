@@ -81,7 +81,7 @@ async fn send_user_settings_to_db(
     let accounts = settings
         .accounts
         .iter()
-        .map(|account| database_schema::models::NewUserAccount {
+        .map(|account| database_schema::models::UserAccount {
             user_id: user.id,
             account_did: account.clone(),
             created_at: now,
