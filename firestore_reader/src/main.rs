@@ -146,22 +146,22 @@ async fn send_user_settings_to_db(
     Ok(())
 }
 
-async fn remove_user_settings_from_db(
-    db_pool: &DBPool,
-    kv_store: &async_nats::jetstream::kv::Store,
-    id: &str,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let mut conn = db_pool.get().await?;
-    diesel::update(
-        database_schema::schema::users::table
-            .filter(database_schema::schema::users::dsl::fcm_token.eq(id)),
-    )
-    .set(database_schema::schema::users::dsl::deleted_at.eq(chrono::Utc::now().naive_utc()))
-    .execute(&mut conn)
-    .await?;
-    update_watched_users(&db_pool, &kv_store).await?;
-    Ok(())
-}
+// async fn remove_user_settings_from_db(
+//     db_pool: &DBPool,
+//     kv_store: &async_nats::jetstream::kv::Store,
+//     id: &str,
+// ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+//     let mut conn = db_pool.get().await?;
+//     diesel::update(
+//         database_schema::schema::users::table
+//             .filter(database_schema::schema::users::dsl::fcm_token.eq(id)),
+//     )
+//     .set(database_schema::schema::users::dsl::deleted_at.eq(chrono::Utc::now().naive_utc()))
+//     .execute(&mut conn)
+//     .await?;
+//     update_watched_users(&db_pool, &kv_store).await?;
+//     Ok(())
+// }
 
 async fn update_watched_users(
     db_pool: &DBPool,
@@ -269,10 +269,19 @@ async fn _main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             let setting_copy = setting.clone();
             let result =
                 send_user_settings_to_db(&db_pool.clone(), &kv_store.clone(), &setting_copy).await;
+
             if let Err(e) = result {
                 panic!("Error sending settings to DB: {e:?}",);
             } else {
                 info!("Settings sent to DB successfully.");
+                // remove from firestore
+                db.fluent()
+                    .delete()
+                    .from(collection_name.as_str())
+                    .document_id(setting.fcm_token.clone())
+                    .execute()
+                    .await
+                    .unwrap();
             }
         }
     }
@@ -294,6 +303,8 @@ async fn _main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             move |event| {
                 let db_pool = db_pool.clone();
                 let kv_store = kv_store.clone();
+                let db = db.clone();
+                let collection_name = collection_name.clone();
                 async move {
                     match event {
                         FirestoreListenEvent::DocumentChange(ref doc_change) => {
@@ -313,6 +324,15 @@ async fn _main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                                             error!("Error sending settings to DB: {e:?}");
                                         } else {
                                             info!("Settings sent to DB successfully.");
+                                            // remove from firestore
+                                            db.fluent()
+                                                .delete()
+                                                .from(collection_name.as_str())
+                                                .document_id(settings.fcm_token.clone())
+                                                .execute()
+                                                .await
+                                                .unwrap();
+                                            info!("Settings removed from Firestore successfully.");
                                         }
                                     }
                                     Err(e) => {
@@ -321,21 +341,21 @@ async fn _main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                                 }
                             }
                         }
-                        FirestoreListenEvent::DocumentDelete(ref doc_delete) => {
-                            debug!("Doc deleted: {doc_delete:?}");
-                            let id = doc_delete.document.split('/').last().unwrap().to_string();
-                            let result = remove_user_settings_from_db(
-                                &db_pool.clone(),
-                                &kv_store.clone(),
-                                &id,
-                            )
-                            .await;
-                            if let Err(e) = result {
-                                error!("Error removing settings from DB: {e:?}");
-                            } else {
-                                info!("Settings removed from DB successfully.");
-                            }
-                        }
+                        // FirestoreListenEvent::DocumentDelete(ref doc_delete) => {
+                        //     debug!("Doc deleted: {doc_delete:?}");
+                        //     let id = doc_delete.document.split('/').last().unwrap().to_string();
+                        //     let result = remove_user_settings_from_db(
+                        //         &db_pool.clone(),
+                        //         &kv_store.clone(),
+                        //         &id,
+                        //     )
+                        //     .await;
+                        //     if let Err(e) = result {
+                        //         error!("Error removing settings from DB: {e:?}");
+                        //     } else {
+                        //         info!("Settings removed from DB successfully.");
+                        //     }
+                        // }
                         _ => {
                             info!("Received an unknown listen response event to handle: {event:?}");
                         }
