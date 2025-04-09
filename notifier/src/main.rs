@@ -329,7 +329,7 @@ async fn get_following(
         }
     }
 
-    debug!("Getting following for {:?}", did);
+    info!("Getting following for {:?}", did);
     let start = chrono::Utc::now();
     let client = client.unwrap_or_else(|| reqwest::Client::new());
 
@@ -348,9 +348,25 @@ async fn get_following(
     }
     let response = response.unwrap();
     if !response.status().is_success() {
-        let msg: String = response.error_for_status().unwrap_err().to_string();
-        error!("Error getting profile: {}", msg);
-        return Err(msg.into());
+        let status: String = response.error_for_status_ref().unwrap_err().to_string();
+        let response_json: Result<Value, _> = response.json().await;
+        if let Ok(json) = response_json {
+            let error = json["error"].as_str();
+            if let Some(error_text) = error {
+                match error_text {
+                    "AccountTakedown" | "AccountDeactivated" => {
+                        return Ok(HashSet::new());
+                    }
+                    _ => {
+                        let msg: String = format!("Error getting profile: {}", error_text);
+                        error!("{}", msg);
+                        return Err(msg.into());
+                    }
+                }
+            }
+        }
+        error!("Error getting profile: {}", status);
+        return Err(status.into());
     }
 
     let json: Result<Value, _> = response.json().await;
@@ -432,6 +448,11 @@ async fn load_bluesky_post(
         return Err(msg.into());
     }
     let raw_json_response: Value = response.json().await?;
+
+    if raw_json_response["posts"][0]["record"].is_null() {
+        return Err("Post not found.".into());
+    }
+
     let record: Result<PostRecord, _> =
         serde_json::from_value(raw_json_response["posts"][0]["record"].clone());
     if record.is_err() {
@@ -694,6 +715,10 @@ async fn process_post(
                 Ok(post) => match post {
                     Ok(post) => post,
                     Err(e) => {
+                        if format!("{:?}", e).contains("Post not found.") {
+                            warn!("Post not found: {:?}", e);
+                            return;
+                        }
                         error!("Error loading Repost: {:?}", e);
                         return;
                     }
@@ -1317,6 +1342,7 @@ fn main() {
             sentry_dsn.ok(),
             sentry::ClientOptions {
                 release: sentry::release_name!(),
+                attach_stacktrace: true,
                 ..Default::default()
             },
         ));
@@ -1361,6 +1387,18 @@ mod tests {
 
         // Test somebody with way too many following, ignore
         let did = "did:plc:w3xevyycvef7y4tqsojptrf5";
+        let follows = get_following(did, None, None).await;
+        println!("{:?}", follows);
+        assert!(follows.unwrap().len() == 0);
+
+        // test somebody with taken down account
+        let did = "did:plc:mxn56keus3cvwabpw4zr3f7h";
+        let follows = get_following(did, None, None).await;
+        println!("{:?}", follows);
+        assert!(follows.unwrap().len() == 0);
+
+        // test somebody with deactivated account
+        let did = "did:plc:znaukyuzxganntnzr5hgerzg";
         let follows = get_following(did, None, None).await;
         println!("{:?}", follows);
         assert!(follows.unwrap().len() == 0);
