@@ -275,13 +275,17 @@ async fn _main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             } else {
                 info!("Settings sent to DB successfully.");
                 // remove from firestore
-                db.fluent()
+                let result = db.fluent()
                     .delete()
                     .from(collection_name.as_str())
                     .document_id(setting.fcm_token.clone())
                     .execute()
-                    .await
-                    .unwrap();
+                    .await;
+                if let Err(e) = result {
+                    panic!("Error removing settings from Firestore: {e:?}");
+                } else {
+                    info!("Settings removed from Firestore successfully.");
+                }
             }
         }
     }
@@ -325,14 +329,17 @@ async fn _main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                                         } else {
                                             info!("Settings sent to DB successfully.");
                                             // remove from firestore
-                                            db.fluent()
+                                            let result = db.fluent()
                                                 .delete()
                                                 .from(collection_name.as_str())
                                                 .document_id(settings.fcm_token.clone())
                                                 .execute()
-                                                .await
-                                                .unwrap();
-                                            info!("Settings removed from Firestore successfully.");
+                                                .await;
+                                            if let Err(e) = result {
+                                                error!("Error removing settings from Firestore: {e:?}");
+                                            } else {
+                                                info!("Settings removed from Firestore successfully.");
+                                            }
                                         }
                                     }
                                     Err(e) => {
