@@ -545,7 +545,7 @@ async fn check_possible_recipient(
         if !allowed_words.is_empty() {
             let mut found = false;
             for word in allowed_words.iter() {
-                if record.text.contains(word) {
+                if record.text.to_lowercase().contains(&word.to_lowercase()) {
                     found = true;
                     break;
                 }
@@ -558,7 +558,7 @@ async fn check_possible_recipient(
 
     if let Some(blocked_words) = user_settings.word_block_list {
         for word in blocked_words.iter() {
-            if record.text.contains(word) {
+            if record.text.to_lowercase().contains(&word.to_lowercase()) {
                 return (possible_recipient, false);
             }
         }
