@@ -1148,11 +1148,15 @@ async fn send_notification(
                             error!("Error deleting notifications: {:?}", result);
                         }
                     } else {
+                        warn!("Token {:?}", fcm_token);
+                        warn!("Payload: {:?}", message);
                         error!("Error sending notification: {:?}", e);
                     }
                 }
                 _ => {
-                    error!("Error sending notification: {:?}", e);
+                    warn!("Token {:?}", fcm_token);
+                    warn!("Payload: {:?}", message);
+                    error!("Unknown Error sending notification: {:?}", e);
                 }
             },
         }
