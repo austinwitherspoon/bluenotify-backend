@@ -98,7 +98,6 @@ async fn get_notifications(
 ) -> Result<String, StatusCode> {
     let span = info_span!("get_notifications", fcm_token = %fcm_token);
     let _enter = span.enter();
-    info!("Getting notifications for user: {}", fcm_token);
     let mut conn = pool
         .get()
         .await
@@ -110,13 +109,7 @@ async fn get_notifications(
         .load(&mut conn)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    info!(
-        "Found {} notifications for user: {}",
-        results.len(),
-        fcm_token
-    );
-
+    
     Ok(serde_json::to_string(&results).unwrap())
 }
 
@@ -489,7 +482,6 @@ async fn _main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     )
                 })
                 .on_request(|_request: &Request<_>, _span: &Span| {
-                    info!("Request: {:?}", _request);
                 })
                 .on_response(|_response: &Response, _latency: Duration, _span: &Span| {
                     // check if the status was not 2xx

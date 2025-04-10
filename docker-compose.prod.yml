@@ -85,7 +85,7 @@ services:
     image: ${PRIVATE_DOCKER_REGISTRY}/ci/blue_notify_web_server:latest
     environment:
       - BIND_WEB=0.0.0.0:8000
-      - RUST_LOG=info,web_server:debug
+      - RUST_LOG=info,web_server:info
       - RUST_BACKTRACE=1
       - SENTRY_DSN=${SENTRY_DSN}
       - LOKI_URL=${LOKI_URL}
