@@ -109,7 +109,7 @@ async fn get_notifications(
         .load(&mut conn)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    
+
     Ok(serde_json::to_string(&results).unwrap())
 }
 
@@ -166,7 +166,6 @@ async fn update_settings(
     Path(fcm_token): Path<String>,
     Json(payload): Json<UserSettings>,
 ) -> Result<String, StatusCode> {
-
     let span = info_span!("update_settings", fcm_token = %fcm_token);
     let _enter = span.enter();
 
@@ -366,6 +365,48 @@ async fn update_watched_users(
     Ok(())
 }
 
+#[axum::debug_handler]
+async fn proxy_post_image(Path(url): Path<String>) -> Result<Response, StatusCode> {
+    let span = info_span!("proxy_post_image", url = %url);
+    let _enter = span.enter();
+    info!("Proxying image: {}", url);
+
+    // verify that it's a bluesky url
+    if !url.starts_with("https://cdn.bsky.app") {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    let client = reqwest::Client::new();
+    let response = client
+        .get(&url)
+        .header("User-Agent", "BlueNotify")
+        .send()
+        .await
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+
+    if response.status() != StatusCode::OK {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let mut headers = HeaderMap::new();
+    for (key, value) in response.headers() {
+        headers.insert(key.clone(), value.clone());
+    }
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+    Ok(Response::builder()
+        .status(StatusCode::OK)
+        .header(
+            "Content-Type",
+            headers
+                .get("Content-Type")
+                .unwrap_or(&"image/jpeg".parse().unwrap()),
+        )
+        .body(bytes.into())
+        .unwrap())
+}
+
 async fn _main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let loki_url = std::env::var("LOKI_URL");
     if let Ok(loki_url) = loki_url {
@@ -456,6 +497,7 @@ async fn _main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         )
         .route("/settings/{fcm_token}", post(update_settings))
         .route("/settings/{fcm_token}", delete(delete_settings))
+        .route("/image/{url}", get(proxy_post_image))
         .with_state(AxumState {
             pool: pg_pool.clone(),
             kv_store: kv_store.clone(),
@@ -481,8 +523,7 @@ async fn _main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                         some_other_field = tracing::field::Empty,
                     )
                 })
-                .on_request(|_request: &Request<_>, _span: &Span| {
-                })
+                .on_request(|_request: &Request<_>, _span: &Span| {})
                 .on_response(|_response: &Response, _latency: Duration, _span: &Span| {
                     // check if the status was not 2xx
                     if _response.status() != StatusCode::OK {

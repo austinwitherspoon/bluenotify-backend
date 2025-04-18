@@ -4353,6 +4353,7 @@ dependencies = [
  "futures",
  "lazy_static",
  "prometheus",
+ "reqwest",
  "sentry",
  "sentry-tracing",
  "serde",
