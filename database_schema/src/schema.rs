@@ -7,6 +7,14 @@ pub mod sql_types {
 }
 
 diesel::table! {
+    account_follows (id) {
+        id -> Int4,
+        account_did -> Text,
+        follow_did -> Text,
+    }
+}
+
+diesel::table! {
     accounts (account_did, user_id) {
         user_id -> Int4,
         account_did -> Text,
@@ -55,6 +63,7 @@ diesel::joinable!(accounts -> users (user_id));
 diesel::joinable!(notification_settings -> users (user_id));
 
 diesel::allow_tables_to_appear_in_same_query!(
+    account_follows,
     accounts,
     notification_settings,
     notifications,
