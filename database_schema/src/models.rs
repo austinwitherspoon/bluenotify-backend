@@ -110,3 +110,22 @@ pub struct UserSetting {
     pub word_block_list: Option<Vec<String>>,
     pub created_at: SerializableTimestamp,
 }
+
+
+#[derive(Insertable, Debug, Clone, PartialEq, Eq)]
+#[diesel(table_name = crate::schema::account_follows)]
+#[diesel(check_for_backend(diesel::pg::Pg))]
+pub struct NewAccountFollow {
+    pub account_did: String,
+    pub follow_did: String,
+}
+
+#[derive(Insertable, Debug, Queryable, Identifiable, Selectable, Clone, PartialEq, Eq)]
+#[diesel(primary_key(id))]
+#[diesel(table_name = crate::schema::account_follows)]
+#[diesel(check_for_backend(diesel::pg::Pg))]
+pub struct AccountFollow {
+    pub id: i32,
+    pub account_did: String,
+    pub follow_did: String,
+}

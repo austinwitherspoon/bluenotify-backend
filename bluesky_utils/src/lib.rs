@@ -1,7 +1,9 @@
 use chrono::{DateTime, TimeZone, Utc};
 use lazy_static::lazy_static;
 use regex::Regex;
-use std::error::Error;
+use serde_json::Value;
+use std::{collections::HashSet, error::Error};
+use tracing::{debug, error, info};
 
 pub fn bluesky_browseable_url(handle: &str, rkey: &str) -> String {
     format!("https://bsky.app/profile/{}/post/{}", handle, rkey)
@@ -81,6 +83,110 @@ pub fn parse_created_at(time: &str) -> Result<DateTime<Utc>, Box<dyn Error>> {
     Ok(datetime)
 }
 
+pub async fn get_following(
+    did: &str,
+    client: Option<reqwest::Client>,
+    pause_between_requests: Option<std::time::Duration>,
+) -> Result<HashSet<String>, Box<dyn std::error::Error + Send + Sync>> {
+    info!("Getting following for {:?}", did);
+    let start = chrono::Utc::now();
+    let client = client.unwrap_or_else(|| reqwest::Client::new());
+
+    // First check and make sure they have less than 10,000 following, otherwise ignore
+    // since this will choke the post in our system
+    let profile_url = format!(
+        "https://public.api.bsky.app/xrpc/app.bsky.actor.getProfile?actor={}",
+        did
+    );
+
+    let response = client
+        .get(&profile_url)
+        .header("User-Agent", "BlueNotify Server")
+        .send()
+        .await;
+    if response.is_err() {
+        let msg: String = response.unwrap_err().to_string();
+        error!("Error getting profile: {}", msg);
+        return Err(msg.into());
+    }
+    let response = response.unwrap();
+    if !response.status().is_success() {
+        let status: String = response.error_for_status_ref().unwrap_err().to_string();
+        let response_json: Result<Value, _> = response.json().await;
+        if let Ok(json) = response_json {
+            let error = json["error"].as_str();
+            if let Some(error_text) = error {
+                match error_text {
+                    "AccountTakedown" | "AccountDeactivated" => {
+                        return Ok(HashSet::new());
+                    }
+                    _ => {
+                        let msg: String = format!("Error getting profile: {}", error_text);
+                        error!("{}", msg);
+                        return Err(msg.into());
+                    }
+                }
+            }
+        }
+        error!("Error getting profile: {}", status);
+        return Err(status.into());
+    }
+
+    let json: Result<Value, _> = response.json().await;
+    let mut following_count = 0;
+    if let Ok(json) = json {
+        following_count = json["followsCount"].as_u64().unwrap_or(0);
+    }
+    if following_count > 10_000 {
+        return Ok(HashSet::new());
+    }
+
+    let mut cursor: Option<String> = None;
+    let mut following = HashSet::new();
+    loop {
+        let url = format!(
+            "https://public.api.bsky.app/xrpc/app.bsky.graph.getFollows?actor={}&limit=100&cursor={}",
+            did,
+            cursor.clone().unwrap_or_default()
+        );
+        debug!("Getting following from {:?}", url);
+        let response = client
+            .get(&url)
+            .header("User-Agent", "BlueNotify Server")
+            .send()
+            .await;
+        if response.is_err() {
+            let msg: String = response.unwrap_err().to_string();
+            error!("Error getting following: {}", msg);
+            return Err(msg.into());
+        }
+        let response = response.unwrap();
+        if !response.status().is_success() {
+            let msg: String = response.error_for_status().unwrap_err().to_string();
+            error!("Error getting following: {}", msg);
+            return Err(msg.into());
+        }
+        let json: Value = response.json().await.unwrap();
+        for follower in json["follows"].as_array().unwrap() {
+            following.insert(follower["did"].as_str().unwrap().to_string());
+        }
+        let cursor_value = json["cursor"].as_str();
+        if cursor_value.is_none() {
+            break;
+        }
+        cursor = Some(cursor_value.unwrap().to_string());
+        if let Some(pause) = pause_between_requests {
+            tokio::time::sleep(pause).await;
+        }
+    }
+
+    let end = chrono::Utc::now();
+    let duration = end - start;
+    debug!("Got following for {:?} in {:?}", did, duration);
+
+    Ok(following)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -131,5 +237,31 @@ mod tests {
             let parsed = parse_created_at(input).unwrap();
             assert_eq!(parsed, expected);
         }
+    }
+    
+    #[tokio::test]
+    async fn test_follows() {
+        let did = "did:plc:jpkjnmydclkafjyicv3s6hcx";
+        let follows = get_following(did, None, None).await;
+        println!("{:?}", follows);
+        assert!(follows.unwrap().len() > 60);
+
+        // Test somebody with way too many following, ignore
+        let did = "did:plc:w3xevyycvef7y4tqsojptrf5";
+        let follows = get_following(did, None, None).await;
+        println!("{:?}", follows);
+        assert!(follows.unwrap().len() == 0);
+
+        // test somebody with taken down account
+        let did = "did:plc:mxn56keus3cvwabpw4zr3f7h";
+        let follows = get_following(did, None, None).await;
+        println!("{:?}", follows);
+        assert!(follows.unwrap().len() == 0);
+
+        // test somebody with deactivated account
+        let did = "did:plc:znaukyuzxganntnzr5hgerzg";
+        let follows = get_following(did, None, None).await;
+        println!("{:?}", follows);
+        assert!(follows.unwrap().len() == 0);
     }
 }

@@ -378,6 +378,11 @@ dependencies = [
  "chrono",
  "lazy_static",
  "regex",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -1737,6 +1742,10 @@ dependencies = [
  "axum 0.8.1",
  "bluesky_utils",
  "chrono",
+ "database_schema",
+ "diesel",
+ "diesel-async",
+ "diesel_migrations",
  "futures",
  "futures-util",
  "lazy_static",

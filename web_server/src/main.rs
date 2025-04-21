@@ -379,7 +379,7 @@ async fn proxy_post_image(Path(url): Path<String>) -> Result<Response, StatusCod
     let client = reqwest::Client::new();
     let response = client
         .get(&url)
-        .header("User-Agent", "BlueNotify")
+        .header("User-Agent", "BlueNotify Server")
         .send()
         .await
         .map_err(|_| StatusCode::BAD_REQUEST)?;
@@ -467,7 +467,7 @@ async fn _main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let governor_conf = Arc::new(
         GovernorConfigBuilder::default()
             .key_extractor(key_extractor::SmartIpKeyExtractor {})
-            .period(Duration::from_millis(500))
+            .period(Duration::from_millis(200))
             .burst_size(10)
             .finish()
             .unwrap(),

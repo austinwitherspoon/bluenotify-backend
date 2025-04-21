@@ -1,6 +1,18 @@
 use async_nats::jetstream::kv::Store;
+use axum::extract::{Path, State};
+use axum::http::StatusCode;
+use axum::response::Response;
 use axum::{routing::get, Router};
+use bluesky_utils::get_following;
 use bluesky_utils::parse_created_at;
+use database_schema::{account_follows, AccountFollow, DBPool, NewAccountFollow};
+use diesel::dsl::exists;
+use diesel::dsl::not;
+use diesel::pg;
+use diesel::prelude::*;
+use diesel_async::pooled_connection::deadpool::Pool;
+use diesel_async::pooled_connection::AsyncDieselConnectionManager;
+use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use futures::TryStreamExt;
 use futures_util::StreamExt;
 use lazy_static::lazy_static;
@@ -10,6 +22,7 @@ use prometheus::{
 use rand::rng;
 use rand::seq::IndexedRandom;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
@@ -17,6 +30,7 @@ use tokio::sync::RwLock;
 use tokio::task::JoinSet;
 use tokio::time::timeout;
 use tokio_tungstenite::connect_async;
+use tracing::debug;
 use tracing::{error, info, warn};
 
 const URLS: [&str; 4] = [
@@ -50,6 +64,11 @@ type SharedWatchedUsers = Arc<RwLock<WatchedUsers>>;
 
 struct WatchedUsers {
     watched_users: HashSet<String>,
+}
+
+#[derive(Clone)]
+struct AxumState {
+    pool: Pool<AsyncPgConnection>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -96,9 +115,91 @@ struct CommitRecord {
     #[serde(alias = "createdAt")]
     created_at: String,
 }
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct JetstreamFollow {
+    did: String,
+    time_us: u64,
+    kind: String,
+    commit: FollowCommit,
+}
 
-async fn get_last_event_time(kv_store: Arc<RwLock<Store>>) -> Option<String> {
-    let result = kv_store.read().await.get("last_jetstream_time").await;
+impl JetstreamFollow {
+    fn subject(&self) -> String {
+        self.commit.record.subject.clone()
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct FollowCommit {
+    rev: String,
+    operation: String,
+    collection: String,
+    rkey: String,
+    record: FollowRecord,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct FollowRecord {
+    #[serde(alias = "$type")]
+    commit_type: String,
+    subject: String,
+    #[serde(alias = "createdAt")]
+    created_at: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct JetstreamUnfollow {
+    did: String,
+    time_us: u64,
+    kind: String,
+    commit: UnfollowCommit,
+}
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct UnfollowCommit {
+    rev: String,
+    operation: String,
+    collection: String,
+    rkey: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(untagged)]
+enum JetstreamFollowEvent {
+    Follow(JetstreamFollow),
+    Unfollow(JetstreamUnfollow),
+}
+
+impl JetstreamFollowEvent {
+    fn did(&self) -> String {
+        match self {
+            JetstreamFollowEvent::Follow(follow) => follow.did.clone(),
+            JetstreamFollowEvent::Unfollow(unfollow) => unfollow.did.clone(),
+        }
+    }
+    fn action(&self) -> String {
+        match self {
+            JetstreamFollowEvent::Follow(_) => "follow".to_string(),
+            JetstreamFollowEvent::Unfollow(_) => "unfollow".to_string(),
+        }
+    }
+
+    fn from_value(value: Value) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        match value["commit"]["operation"].as_str() {
+            Some("create") => {
+                let follow: JetstreamFollow = serde_json::from_value(value)?;
+                Ok(JetstreamFollowEvent::Follow(follow))
+            }
+            Some("delete") => {
+                let unfollow: JetstreamUnfollow = serde_json::from_value(value)?;
+                Ok(JetstreamFollowEvent::Unfollow(unfollow))
+            }
+            _ => Err("Unknown operation".into()),
+        }
+    }
+}
+
+async fn get_last_event_time(kv_store: Store) -> Option<String> {
+    let result = kv_store.get("last_jetstream_time").await;
     if result.is_err() {
         return None;
     }
@@ -111,14 +212,176 @@ async fn get_last_event_time(kv_store: Arc<RwLock<Store>>) -> Option<String> {
     Some(string_message.to_string())
 }
 
+async fn rescan_user_follows(did: String, pg_pool: DBPool) {
+    info!("Rescanning follows for {}", did);
+    let follows = get_following(&did, None, Some(std::time::Duration::from_millis(50))).await;
+    if follows.is_err() {
+        error!("Error getting follows: {:?}", follows);
+        return;
+    }
+    let follows = follows.unwrap();
+    let mut conn = {
+        let conn = pg_pool.get().await;
+        if conn.is_err() {
+            error!("Error getting PG from pool!");
+            return;
+        }
+        conn.unwrap()
+    };
+
+    let mut existing_follows = HashSet::new();
+    let existing = account_follows::table
+        .filter(account_follows::account_did.eq(did.clone()))
+        .load::<AccountFollow>(&mut conn)
+        .await;
+    if existing.is_err() {
+        error!("Error getting existing follows: {:?}", existing);
+        return;
+    }
+    let existing = existing.unwrap();
+    for follow in existing {
+        existing_follows.insert(follow.follow_did);
+    }
+
+    let to_remove = existing_follows
+        .difference(&follows)
+        .cloned()
+        .collect::<Vec<String>>();
+
+    let to_add = follows
+        .difference(&existing_follows)
+        .cloned()
+        .collect::<Vec<String>>();
+
+    diesel::delete(
+        account_follows::table
+            .filter(account_follows::account_did.eq(did.clone()))
+            .filter(account_follows::follow_did.eq_any(to_remove)),
+    )
+    .execute(&mut conn)
+    .await
+    .unwrap();
+
+    let new_follows = to_add
+        .iter()
+        .map(|follow| NewAccountFollow {
+            account_did: did.clone(),
+            follow_did: follow.clone(),
+        })
+        .collect::<Vec<NewAccountFollow>>();
+
+    if new_follows.is_empty() {
+        return;
+    }
+    diesel::insert_into(account_follows::table)
+        .values(new_follows)
+        .execute(&mut conn)
+        .await
+        .unwrap();
+}
+
+async fn handle_follow_event(event: JetstreamFollowEvent, pg_pool: DBPool) {
+    // try forever until it works! We don't want to miss any follow updates
+    loop {
+        info!("Handling {} event for: {:?}", event.action(), event.did());
+        let pg_pool = pg_pool.clone();
+        match event.clone() {
+            JetstreamFollowEvent::Follow(follow_event) => {
+                // On a follow event, we can just insert the follow into the database
+                let mut conn = {
+                    let conn = pg_pool.get().await;
+                    if conn.is_err() {
+                        error!("Error getting PG from pool!");
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                        continue;
+                    }
+                    conn.unwrap()
+                };
+
+                // first check if it already exists
+                let exists = account_follows::table
+                    .filter(account_follows::account_did.eq(follow_event.did.clone()))
+                    .filter(account_follows::follow_did.eq(follow_event.subject()))
+                    .first::<AccountFollow>(&mut conn)
+                    .await;
+
+                if exists.is_ok() {
+                    info!("Already exists, skipping: {:?}", follow_event);
+                    return;
+                }
+
+                let follow = NewAccountFollow {
+                    account_did: follow_event.did.clone(),
+                    follow_did: follow_event.subject(),
+                };
+                let result = diesel::insert_into(account_follows::table)
+                    .values(follow)
+                    .execute(&mut conn)
+                    .await;
+
+                if result.is_err() {
+                    error!("Error inserting follow: {:?}", result);
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    continue;
+                }
+                return;
+            }
+            JetstreamFollowEvent::Unfollow(unfollow) => {
+                // on an unfollow, we can't know what user was unfollowed, so unfortunately have to
+                // rescan the entire list of users!
+                rescan_user_follows(unfollow.did, pg_pool).await;
+                return;
+            }
+        }
+    }
+}
+
+async fn fill_in_missing_follows(
+    pg_pool: DBPool,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let mut conn = {
+        let conn = pg_pool.get().await;
+        if conn.is_err() {
+            error!("Error getting PG from pool!");
+            return Err("Error getting PG from pool!".into());
+        }
+        conn.unwrap()
+    };
+
+    let users_to_fill = database_schema::schema::accounts::table
+        .select(database_schema::schema::accounts::dsl::account_did)
+        .filter(not(exists(
+            database_schema::schema::account_follows::table.filter(
+                database_schema::schema::account_follows::dsl::account_did
+                    .eq(database_schema::schema::accounts::dsl::account_did),
+            ),
+        )))
+        .distinct()
+        .load::<String>(&mut conn)
+        .await?;
+
+    info!(
+        "Filling in missing follows for {} users",
+        users_to_fill.len()
+    );
+
+    for user in users_to_fill {
+        rescan_user_follows(user, pg_pool.clone()).await;
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+
+    Ok(())
+}
+
 async fn connect_and_listen(
     base_url: &str,
     watched_users: SharedWatchedUsers,
     nats_js: Arc<RwLock<async_nats::jetstream::Context>>,
-    kv_store: Arc<RwLock<Store>>,
+    kv_store: Store,
+    pg_pool: DBPool,
 ) {
     let mut url = format!(
-        "{}?wantedCollections=app.bsky.feed.post&wantedCollections=app.bsky.feed.repost",
+        "{}?wantedCollections=app.bsky.feed.post&wantedCollections=app.bsky.feed.repost&wantedCollections=app.bsky.graph.follow",
         base_url
     );
     let last_event_time = get_last_event_time(kv_store.clone()).await;
@@ -148,6 +411,9 @@ async fn connect_and_listen(
         }
         let frame = frame.unwrap();
         let text = String::from_utf8_lossy(&frame.into_data()).into_owned();
+        if text.is_empty() {
+            continue;
+        }
         ALL_MESSAGES_COUNTER.inc();
         let did = text
             .split_once("\"did\":\"")
@@ -157,11 +423,32 @@ async fn connect_and_listen(
             .unwrap_or(("", ""))
             .0;
         if did.is_empty() {
+            debug!("No did found in message: {:?}", text);
             error!("Error getting did: {:?}", did);
             continue;
         }
         let is_watched = watched_users.read().await.watched_users.contains(did);
         if !is_watched {
+            continue;
+        }
+        let raw: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+        if raw.is_null() {
+            error!("Error parsing JSON: {:?}", text);
+            continue;
+        }
+        let collection = raw["commit"]["collection"].as_str().unwrap_or("");
+        if collection == "app.bsky.graph.follow" {
+            let event: Result<JetstreamFollowEvent, _> = JetstreamFollowEvent::from_value(raw);
+            if event.is_err() {
+                error!("Error deserializing follow: {:?}", event);
+                continue;
+            }
+            let event = event.unwrap();
+            let pg_pool = pg_pool.clone();
+
+            tokio::spawn(async move {
+                handle_follow_event(event, pg_pool).await;
+            });
             continue;
         }
         let post: Result<JetstreamPost, _> = serde_json::from_str(&text);
@@ -226,8 +513,6 @@ async fn connect_and_listen(
 
         // Publish the last jetstream time
         _ = kv_store
-            .write()
-            .await
             .put("last_jetstream_time", post.time_us.to_string().into())
             .await;
     }
@@ -236,39 +521,72 @@ async fn connect_and_listen(
 async fn listen_to_jetstream_forever(
     watched_users: SharedWatchedUsers,
     nats_js: async_nats::jetstream::Context,
-    kv_store: Arc<RwLock<Store>>,
+    kv_store: Store,
+    pg_pool: DBPool,
 ) {
     let shared_js: Arc<RwLock<async_nats::jetstream::Context>> = Arc::new(RwLock::new(nats_js));
     loop {
         let url = URLS.choose(&mut rng()).unwrap();
         let watched_users = watched_users.clone();
-        connect_and_listen(url, watched_users, shared_js.clone(), kv_store.clone()).await;
+        connect_and_listen(
+            url,
+            watched_users,
+            shared_js.clone(),
+            kv_store.clone(),
+            pg_pool.clone(),
+        )
+        .await;
         info!("Retrying connection...");
     }
 }
 
-/// Listen to the NATS jetstream for updates, and replace the watched users list
-async fn listen_to_watched_forever(kv_store: Store, watched_users: SharedWatchedUsers) {
-    let watched = kv_store.get("watched_users").await;
-    if watched.is_err() {
-        error!("Error getting watched users: {:?}", watched);
-    } else {
-        let watched = watched.unwrap();
-        if watched.is_some() {
-            let watched: Result<HashSet<String>, _> =
-                serde_json::from_slice(watched.unwrap().as_ref());
-            if watched.is_err() {
-                error!("Error deserializing watched users: {:?}", watched);
-            } else {
-                let mut watched_users = watched_users.write().await;
-                watched_users.watched_users = watched.unwrap();
-                info!(
-                    "Updated watched users: Len {:?}",
-                    watched_users.watched_users.len()
-                );
-            }
+async fn update_watched_users(
+    watched_users: SharedWatchedUsers,
+    pg_pool: DBPool,
+) -> Result<HashSet<String>, Box<dyn std::error::Error + Send + Sync>> {
+    let mut conn = {
+        let conn = pg_pool.get().await;
+        if conn.is_err() {
+            error!("Error getting PG from pool!");
+            return Err("Error getting PG from pool!".into());
         }
-    }
+        conn.unwrap()
+    };
+
+    let actual_watched_users = database_schema::schema::notification_settings::table
+        .select(database_schema::schema::notification_settings::dsl::following_did)
+        .distinct()
+        .load::<String>(&mut conn)
+        .await?;
+
+    let bluenotify_users = database_schema::schema::accounts::table
+        .select(database_schema::schema::accounts::dsl::account_did)
+        .distinct()
+        .load::<String>(&mut conn)
+        .await?;
+
+    let combined = actual_watched_users
+        .into_iter()
+        .chain(bluenotify_users.into_iter())
+        .collect::<HashSet<String>>();
+
+    let mut watched_users = watched_users.write().await;
+    watched_users.watched_users = combined.clone();
+    info!(
+        "Updated watched users: Len {:?}",
+        watched_users.watched_users.len()
+    );
+
+    Ok(combined)
+}
+
+/// Listen to the NATS jetstream for updates, and replace the watched users list
+async fn listen_to_watched_forever(
+    kv_store: Store,
+    watched_users: SharedWatchedUsers,
+    pg_pool: DBPool,
+) {
+    _ = update_watched_users(watched_users.clone(), pg_pool.clone()).await;
     loop {
         let messages = kv_store.watch("watched_users").await;
         if messages.is_err() {
@@ -277,27 +595,50 @@ async fn listen_to_watched_forever(kv_store: Store, watched_users: SharedWatched
             continue;
         }
         let mut messages = messages.unwrap();
-        while let Ok(Some(message)) = messages.try_next().await {
-            type WatchedJson = HashSet<String>;
-            let watched: Result<WatchedJson, _> = serde_json::from_slice(message.value.as_ref());
-            if watched.is_err() {
-                error!("Error deserializing watched users: {:?}", watched);
-                continue;
-            }
-            let mut watched_users = watched_users.write().await;
-            watched_users.watched_users = watched.unwrap();
-            info!(
-                "Updated watched users: len {:?}",
-                watched_users.watched_users.len()
-            );
+        while let Ok(Some(_message)) = messages.try_next().await {
+            _ = update_watched_users(watched_users.clone(), pg_pool.clone()).await;
         }
     }
+}
+
+#[axum::debug_handler]
+async fn rescan_user_web_request(
+    State(AxumState { pool: pg_pool }): State<AxumState>,
+    Path(did): Path<String>,
+) -> Result<Response, StatusCode> {
+    if did.is_empty() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    rescan_user_follows(did, pg_pool).await;
+    Ok(Response::builder()
+        .status(StatusCode::OK)
+        .body("Rescanned user".into())
+        .unwrap())
+}
+
+#[axum::debug_handler]
+async fn rescan_missing(
+    State(AxumState { pool: pg_pool }): State<AxumState>,
+) -> Result<Response, StatusCode> {
+    tokio::spawn(async move {
+        fill_in_missing_follows(pg_pool.clone()).await.unwrap();
+    });
+    Ok(Response::builder()
+        .status(StatusCode::OK)
+        .body("Started rescan job.".into())
+        .unwrap())
 }
 
 async fn _main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     tracing_subscriber::fmt::init();
 
     info!("Starting up Bluesky Jetstream Reader.");
+
+    info!("Getting DB");
+    let pg_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+    let pg_config = AsyncDieselConnectionManager::<diesel_async::AsyncPgConnection>::new(&pg_url);
+    let pg_pool = Pool::builder(pg_config).build()?;
+    info!("Got DB");
 
     let mut nats_host = std::env::var("NATS_HOST").unwrap_or("localhost".to_string());
     if !nats_host.contains(':') {
@@ -335,12 +676,15 @@ async fn _main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         watched_users: HashSet::new(),
     }));
 
-    let shared_kv: Arc<RwLock<Store>> = Arc::new(RwLock::new(kv_store.clone()));
-
     info!("Starting up metrics server on {}", axum_url);
     let axum_app = Router::new()
         .route("/", get(|| async { "Jetstream_reader server online." }))
-        .route("/metrics", get(metrics));
+        .route("/metrics", get(metrics))
+        .route("/rescan/{did}", get(rescan_user_web_request))
+        .route("/rescan_missing", get(rescan_missing))
+        .with_state(AxumState {
+            pool: pg_pool.clone(),
+        });
     let axum_listener = tokio::net::TcpListener::bind(axum_url).await.unwrap();
 
     let mut tasks: JoinSet<_> = JoinSet::new();
@@ -348,12 +692,22 @@ async fn _main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     tasks.spawn(listen_to_jetstream_forever(
         watched_copy,
         nats_js,
-        shared_kv.clone(),
+        kv_store.clone(),
+        pg_pool.clone(),
     ));
     let watched_copy = shared_watched_users.clone();
-    tasks.spawn(listen_to_watched_forever(kv_store, watched_copy));
+    tasks.spawn(listen_to_watched_forever(
+        kv_store,
+        watched_copy,
+        pg_pool.clone(),
+    ));
     tasks.spawn(async move {
         axum::serve(axum_listener, axum_app).await.unwrap();
+    });
+
+    // fill in missing follows
+    tasks.spawn(async move {
+        fill_in_missing_follows(pg_pool.clone()).await.unwrap();
     });
 
     tasks.join_all().await;

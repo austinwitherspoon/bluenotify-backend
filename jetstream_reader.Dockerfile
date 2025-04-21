@@ -26,7 +26,7 @@ FROM debian:bookworm
 ARG APP=/usr/src/app
 
 RUN apt-get update \
-    && apt-get install -y ca-certificates tzdata \
+    && apt-get install -y ca-certificates tzdata libpq5 \
     && rm -rf /var/lib/apt/lists/*
 
 EXPOSE 8000
