@@ -83,11 +83,45 @@ pub fn parse_created_at(time: &str) -> Result<DateTime<Utc>, Box<dyn Error>> {
     Ok(datetime)
 }
 
+
+pub enum GetFollowsError {
+    RequestError(reqwest::Error),
+    StatusError(reqwest::StatusCode),
+    TooManyFollows(u64),
+    DisabledAccount,
+}
+
+impl std::fmt::Display for GetFollowsError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            GetFollowsError::RequestError(err) => write!(f, "Request error: {}", err),
+            GetFollowsError::StatusError(status) => write!(f, "Status error: {}", status),
+            GetFollowsError::TooManyFollows(count) => {
+                write!(f, "Too many follows: {}", count)
+            }
+            GetFollowsError::DisabledAccount => write!(f, "Account is disabled"),
+        }
+    }
+}
+
+impl std::fmt::Debug for GetFollowsError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            GetFollowsError::RequestError(err) => write!(f, "Request error: {:?}", err),
+            GetFollowsError::StatusError(status) => write!(f, "Status error: {:?}", status),
+            GetFollowsError::TooManyFollows(count) => {
+                write!(f, "Too many follows: {:?}", count)
+            }
+            GetFollowsError::DisabledAccount => write!(f, "Account is disabled"),
+        }
+    }
+}
+
 pub async fn get_following(
     did: &str,
     client: Option<reqwest::Client>,
     pause_between_requests: Option<std::time::Duration>,
-) -> Result<HashSet<String>, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<HashSet<String>, GetFollowsError> {
     info!("Getting following for {:?}", did);
     let start = chrono::Utc::now();
     let client = client.unwrap_or_else(|| reqwest::Client::new());
@@ -105,31 +139,33 @@ pub async fn get_following(
         .send()
         .await;
     if response.is_err() {
-        let msg: String = response.unwrap_err().to_string();
+        let err = response.unwrap_err();
+        let msg: String = err.to_string();
         error!("Error getting profile: {}", msg);
-        return Err(msg.into());
+        return Err(GetFollowsError::RequestError(err));
     }
     let response = response.unwrap();
     if !response.status().is_success() {
-        let status: String = response.error_for_status_ref().unwrap_err().to_string();
+        
+        let status = response.status();
         let response_json: Result<Value, _> = response.json().await;
         if let Ok(json) = response_json {
             let error = json["error"].as_str();
             if let Some(error_text) = error {
                 match error_text {
                     "AccountTakedown" | "AccountDeactivated" => {
-                        return Ok(HashSet::new());
+                        return Err(GetFollowsError::DisabledAccount);
                     }
                     _ => {
                         let msg: String = format!("Error getting profile: {}", error_text);
                         error!("{}", msg);
-                        return Err(msg.into());
+                        return Err(GetFollowsError::StatusError(status));
                     }
                 }
             }
         }
         error!("Error getting profile: {}", status);
-        return Err(status.into());
+        return Err(GetFollowsError::StatusError(status));
     }
 
     let json: Result<Value, _> = response.json().await;
@@ -138,7 +174,7 @@ pub async fn get_following(
         following_count = json["followsCount"].as_u64().unwrap_or(0);
     }
     if following_count > 10_000 {
-        return Ok(HashSet::new());
+        return Err(GetFollowsError::TooManyFollows(following_count));
     }
 
     let mut cursor: Option<String> = None;
@@ -156,15 +192,16 @@ pub async fn get_following(
             .send()
             .await;
         if response.is_err() {
-            let msg: String = response.unwrap_err().to_string();
+            let err = response.unwrap_err();
+            let msg: String = err.to_string();
             error!("Error getting following: {}", msg);
-            return Err(msg.into());
+            return Err(GetFollowsError::RequestError(err));
         }
         let response = response.unwrap();
         if !response.status().is_success() {
-            let msg: String = response.error_for_status().unwrap_err().to_string();
-            error!("Error getting following: {}", msg);
-            return Err(msg.into());
+            let status: String = response.error_for_status_ref().unwrap_err().to_string();
+            error!("Error getting following: {}", status);
+            return Err(GetFollowsError::StatusError(response.status()));
         }
         let json: Value = response.json().await.unwrap();
         for follower in json["follows"].as_array().unwrap() {
@@ -242,26 +279,43 @@ mod tests {
     #[tokio::test]
     async fn test_follows() {
         let did = "did:plc:jpkjnmydclkafjyicv3s6hcx";
-        let follows = get_following(did, None, None).await;
+        let follows = get_following(did, None, None).await.expect("Failed to get following");
         println!("{:?}", follows);
-        assert!(follows.unwrap().len() > 60);
+        assert!(follows.len() > 60);
 
         // Test somebody with way too many following, ignore
         let did = "did:plc:w3xevyycvef7y4tqsojptrf5";
         let follows = get_following(did, None, None).await;
         println!("{:?}", follows);
-        assert!(follows.unwrap().len() == 0);
+        match follows {
+            Err(GetFollowsError::TooManyFollows(count)) => {
+                assert!(count > 10_000);
+            }
+            _ => {
+                panic!("Expected TooManyFollows error, got {:?}", follows);
+            }
+        }
 
         // test somebody with taken down account
         let did = "did:plc:mxn56keus3cvwabpw4zr3f7h";
         let follows = get_following(did, None, None).await;
         println!("{:?}", follows);
-        assert!(follows.unwrap().len() == 0);
+        match follows {
+            Err(GetFollowsError::DisabledAccount) => (),
+            _ => {
+                panic!("Expected DisabledAccount error, got {:?}", follows);
+            }
+        }
 
         // test somebody with deactivated account
         let did = "did:plc:znaukyuzxganntnzr5hgerzg";
         let follows = get_following(did, None, None).await;
         println!("{:?}", follows);
-        assert!(follows.unwrap().len() == 0);
+        match follows {
+            Err(GetFollowsError::DisabledAccount) => (),
+            _ => {
+                panic!("Expected DisabledAccount error, got {:?}", follows);
+            }
+        }
     }
 }

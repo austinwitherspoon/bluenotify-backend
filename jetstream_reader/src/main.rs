@@ -3,9 +3,8 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::Response;
 use axum::{routing::get, Router};
-use bluesky_utils::get_following;
-use bluesky_utils::parse_created_at;
-use database_schema::{account_follows, run_migrations, AccountFollow, DBPool, NewAccountFollow};
+use bluesky_utils::{get_following, parse_created_at, GetFollowsError};
+use database_schema::{account_follows, run_migrations, AccountFollow, DBPool};
 use diesel::dsl::exists;
 use diesel::dsl::not;
 use diesel::prelude::*;
@@ -63,6 +62,7 @@ type SharedWatchedUsers = Arc<RwLock<WatchedUsers>>;
 
 struct WatchedUsers {
     watched_users: HashSet<String>,
+    bluenotify_users: HashSet<String>,
 }
 
 #[derive(Clone)]
@@ -215,8 +215,34 @@ async fn rescan_user_follows(did: String, pg_pool: DBPool) {
     info!("Rescanning follows for {}", did);
     let follows = get_following(&did, None, Some(std::time::Duration::from_millis(50))).await;
     if follows.is_err() {
-        error!("Error getting follows: {:?}", follows);
-        return;
+        let error = follows.unwrap_err();
+            match error {
+                GetFollowsError::TooManyFollows(count) => {
+                    let mut conn = {
+                        let conn = pg_pool.get().await;
+                        if conn.is_err() {
+                            error!("Error getting PG from pool!");
+                            return;
+                        }
+                        conn.unwrap()
+                    };
+                    _ = diesel::update(database_schema::schema::accounts::table)
+                        .filter(database_schema::schema::accounts::dsl::account_did.eq(did.clone()))
+                        .set(database_schema::schema::accounts::dsl::too_many_follows.eq(true))
+                        .execute(&mut conn)
+                        .await;
+                    error!("Too many follows for {}: {}", did, count);
+                    return;
+                }
+                GetFollowsError::DisabledAccount => {
+                    error!("User disabled: {}", did);
+                    return;
+                }
+                _ => {
+                    error!("Error getting follows: {:?}", error);
+                    return;
+                }
+            }
     }
     let follows = follows.unwrap();
     let mut conn = {
@@ -263,11 +289,11 @@ async fn rescan_user_follows(did: String, pg_pool: DBPool) {
 
     let new_follows = to_add
         .iter()
-        .map(|follow| NewAccountFollow {
+        .map(|follow| AccountFollow {
             account_did: did.clone(),
             follow_did: follow.clone(),
         })
-        .collect::<Vec<NewAccountFollow>>();
+        .collect::<Vec<AccountFollow>>();
 
     if new_follows.is_empty() {
         return;
@@ -284,6 +310,33 @@ async fn handle_follow_event(event: JetstreamFollowEvent, pg_pool: DBPool) {
     loop {
         info!("Handling {} event for: {:?}", event.action(), event.did());
         let pg_pool = pg_pool.clone();
+
+        {
+            let mut conn = {
+                let conn = pg_pool.get().await;
+                if conn.is_err() {
+                    error!("Error getting PG from pool!");
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    continue;
+                }
+                conn.unwrap()
+            };
+            let too_many_follows = database_schema::schema::accounts::table
+                .select(database_schema::schema::accounts::dsl::too_many_follows)
+                .filter(database_schema::schema::accounts::dsl::account_did.eq(event.did()))
+                .first::<bool>(&mut conn)
+                .await;
+            match too_many_follows {
+                Ok(too_many_follows) => {
+                    if too_many_follows {
+                        return;
+                    }
+                }
+                Err(_) => {
+                    continue;
+                }
+            }
+        }
         match event.clone() {
             JetstreamFollowEvent::Follow(follow_event) => {
                 // On a follow event, we can just insert the follow into the database
@@ -297,24 +350,14 @@ async fn handle_follow_event(event: JetstreamFollowEvent, pg_pool: DBPool) {
                     conn.unwrap()
                 };
 
-                // first check if it already exists
-                let exists = account_follows::table
-                    .filter(account_follows::account_did.eq(follow_event.did.clone()))
-                    .filter(account_follows::follow_did.eq(follow_event.subject()))
-                    .first::<AccountFollow>(&mut conn)
-                    .await;
-
-                if exists.is_ok() {
-                    info!("Already exists, skipping: {:?}", follow_event);
-                    return;
-                }
-
-                let follow = NewAccountFollow {
+                let follow = AccountFollow {
                     account_did: follow_event.did.clone(),
                     follow_did: follow_event.subject(),
                 };
                 let result = diesel::insert_into(account_follows::table)
                     .values(follow)
+                    .on_conflict((account_follows::account_did, account_follows::follow_did))
+                    .do_nothing()
                     .execute(&mut conn)
                     .await;
 
@@ -427,7 +470,8 @@ async fn connect_and_listen(
             continue;
         }
         let is_watched = watched_users.read().await.watched_users.contains(did);
-        if !is_watched {
+        let is_bluenotify = watched_users.read().await.bluenotify_users.contains(did);
+        if !is_watched && !is_bluenotify {
             continue;
         }
         let raw: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
@@ -436,7 +480,7 @@ async fn connect_and_listen(
             continue;
         }
         let collection = raw["commit"]["collection"].as_str().unwrap_or("");
-        if collection == "app.bsky.graph.follow" {
+        if collection == "app.bsky.graph.follow" && is_bluenotify {
             let event: Result<JetstreamFollowEvent, _> = JetstreamFollowEvent::from_value(raw);
             if event.is_err() {
                 error!("Error deserializing follow: {:?}", event);
@@ -448,6 +492,9 @@ async fn connect_and_listen(
             tokio::spawn(async move {
                 handle_follow_event(event, pg_pool).await;
             });
+            continue;
+        }
+        if !is_watched {
             continue;
         }
         let post: Result<JetstreamPost, _> = serde_json::from_str(&text);
@@ -542,7 +589,7 @@ async fn listen_to_jetstream_forever(
 async fn update_watched_users(
     watched_users: SharedWatchedUsers,
     pg_pool: DBPool,
-) -> Result<HashSet<String>, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut conn = {
         let conn = pg_pool.get().await;
         if conn.is_err() {
@@ -564,19 +611,20 @@ async fn update_watched_users(
         .load::<String>(&mut conn)
         .await?;
 
-    let combined = actual_watched_users
-        .into_iter()
-        .chain(bluenotify_users.into_iter())
-        .collect::<HashSet<String>>();
-
     let mut watched_users = watched_users.write().await;
-    watched_users.watched_users = combined.clone();
+    watched_users.watched_users = actual_watched_users.into_iter().collect();
+    watched_users.bluenotify_users = bluenotify_users.into_iter().collect();
+
     info!(
         "Updated watched users: Len {:?}",
         watched_users.watched_users.len()
     );
+    info!(
+        "Updated bluenotify users: Len {:?}",
+        watched_users.bluenotify_users.len()
+    );
 
-    Ok(combined)
+    Ok(())
 }
 
 /// Listen to the NATS jetstream for updates, and replace the watched users list
@@ -675,6 +723,7 @@ async fn _main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     let shared_watched_users = Arc::new(RwLock::new(WatchedUsers {
         watched_users: HashSet::new(),
+        bluenotify_users: HashSet::new(),
     }));
 
     info!("Starting up metrics server on {}", axum_url);

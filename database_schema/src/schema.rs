@@ -7,8 +7,7 @@ pub mod sql_types {
 }
 
 diesel::table! {
-    account_follows (id) {
-        id -> Int4,
+    account_follows (account_did, follow_did) {
         account_did -> Text,
         follow_did -> Text,
     }
@@ -19,6 +18,7 @@ diesel::table! {
         user_id -> Int4,
         account_did -> Text,
         created_at -> Timestamp,
+        too_many_follows -> Bool,
     }
 }
 
