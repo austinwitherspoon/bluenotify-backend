@@ -494,7 +494,7 @@ async fn connect_and_listen(
             });
             continue;
         }
-        if !is_watched {
+        if !is_watched || collection == "app.bsky.graph.follow" {
             continue;
         }
         let post: Result<JetstreamPost, _> = serde_json::from_str(&text);
