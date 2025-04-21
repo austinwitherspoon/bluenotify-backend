@@ -9,7 +9,8 @@ use axum_prometheus::PrometheusMetricLayer;
 use database_schema::diesel_async::pooled_connection::deadpool::Object;
 use database_schema::timestamp::SerializableTimestamp;
 use database_schema::{
-    accounts, notification_settings, notifications, run_migrations, users, NewUser, Notification, User, UserAccount, UserSetting
+    accounts, notification_settings, notifications, run_migrations, users, NewUser, Notification,
+    User, UserAccount, UserSetting,
 };
 use diesel::prelude::*;
 use diesel_async::pooled_connection::deadpool::Pool;
@@ -58,8 +59,6 @@ async fn get_or_create_user(
     mut conn: &mut Object<AsyncPgConnection>,
     fcm_token: String,
 ) -> Result<User, StatusCode> {
-    let span = info_span!("get_or_create_user", fcm_token = %fcm_token);
-    let _enter = span.enter();
     info!("Creating user if not exists: {}", fcm_token);
     let now = chrono::Utc::now().naive_utc();
     let new_user = NewUser {
@@ -97,8 +96,6 @@ async fn get_notifications(
     State(AxumState { pool, .. }): State<AxumState>,
     Path(fcm_token): Path<String>,
 ) -> Result<String, StatusCode> {
-    let span = info_span!("get_notifications", fcm_token = %fcm_token);
-    let _enter = span.enter();
     let mut conn = pool
         .get()
         .await
@@ -119,8 +116,6 @@ async fn clear_notifications(
     State(AxumState { pool, .. }): State<AxumState>,
     Path(fcm_token): Path<String>,
 ) -> Result<String, StatusCode> {
-    let span = info_span!("clear_notifications", fcm_token = %fcm_token);
-    let _enter = span.enter();
     info!("Clearing notifications for user: {}", fcm_token);
     let mut conn = pool
         .get()
@@ -140,8 +135,6 @@ async fn delete_notification(
     State(AxumState { pool, .. }): State<AxumState>,
     Path((fcm_token, notification_id)): Path<(String, i32)>,
 ) -> Result<String, StatusCode> {
-    let span = info_span!("delete_notification", fcm_token = %fcm_token, notification_id = notification_id);
-    let _enter = span.enter();
     info!(
         "deleting notification {} for user: {}",
         notification_id, fcm_token
@@ -163,13 +156,10 @@ async fn delete_notification(
 #[axum::debug_handler]
 /// Update the entire settings bundle for a user in one go
 async fn update_settings(
-    State(AxumState { pool, kv_store , ..}): State<AxumState>,
+    State(AxumState { pool, kv_store, .. }): State<AxumState>,
     Path(fcm_token): Path<String>,
     Json(payload): Json<UserSettings>,
 ) -> Result<String, StatusCode> {
-    let span = info_span!("update_settings", fcm_token = %fcm_token);
-    let _enter = span.enter();
-
     info!("Updating settings for user: {}", fcm_token);
 
     let mut payload = payload.clone();
@@ -307,11 +297,9 @@ async fn update_settings(
 
 #[axum::debug_handler]
 async fn delete_settings(
-    State(AxumState { pool, kv_store , ..}): State<AxumState>,
+    State(AxumState { pool, kv_store, .. }): State<AxumState>,
     Path(fcm_token): Path<String>,
 ) -> Result<String, StatusCode> {
-    let span = info_span!("delete_settings", fcm_token = %fcm_token);
-    let _enter = span.enter();
     info!("Deleting settings for user: {}", fcm_token);
     let mut conn = pool
         .get()
@@ -368,8 +356,6 @@ async fn update_watched_users(
 
 #[axum::debug_handler]
 async fn proxy_post_image(Path(url): Path<String>) -> Result<Response, StatusCode> {
-    let span = info_span!("proxy_post_image", url = %url);
-    let _enter = span.enter();
     info!("Proxying image: {}", url);
 
     // verify that it's a bluesky url
@@ -408,10 +394,7 @@ async fn proxy_post_image(Path(url): Path<String>) -> Result<Response, StatusCod
         .unwrap())
 }
 
-
-async fn metrics(
-    State(AxumState { metric_handle, .. }): State<AxumState>,
-) -> String {
+async fn metrics(State(AxumState { metric_handle, .. }): State<AxumState>) -> String {
     let mut buffer = vec![];
     let encoder = TextEncoder::new();
     let metric_families = prometheus::gather();
@@ -531,16 +514,32 @@ async fn _main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 .make_span_with(|request: &Request<_>| {
                     // Log the matched route's path (with placeholders not filled in).
                     // Use request.uri() or OriginalUri if you want the real path.
-                    let matched_path = request
+                    let route = request
                         .extensions()
                         .get::<MatchedPath>()
                         .map(MatchedPath::as_str);
 
+                    // extract fcm_token from the request path
+                    // how many slashes until fcm_token?
+                    let path = request.uri().path();
+                    let fcm_token = match route {
+                        Some(route) => {
+                            let mut path_parts = path.split('/');
+                            let route = route.to_string();
+                            let route_parts = route.split('/').collect::<Vec<&str>>();
+                            match route_parts.iter().position(|x| *x == "{fcm_token}") {
+                                Some(index) => path_parts.nth(index).unwrap_or("").to_string(),
+                                None => "".to_string(),
+                            }
+                        }
+                        None => "".to_string(),
+                    };
+
                     info_span!(
                         "http_request",
                         method = ?request.method(),
-                        matched_path,
-                        some_other_field = tracing::field::Empty,
+                        route,
+                        token = fcm_token,
                     )
                 })
                 .on_request(|_request: &Request<_>, _span: &Span| {})
@@ -551,14 +550,6 @@ async fn _main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                         warn!("Error: {:?}", _response);
                     }
                 })
-                .on_body_chunk(|_chunk: &Bytes, _latency: Duration, _span: &Span| {
-                    // ...
-                })
-                .on_eos(
-                    |_trailers: Option<&HeaderMap>, _stream_duration: Duration, _span: &Span| {
-                        // ...
-                    },
-                )
                 .on_failure(
                     |_error: ServerErrorsFailureClass, _latency: Duration, _span: &Span| {
                         _span.record("error", "true");
