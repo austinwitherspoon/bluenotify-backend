@@ -4,19 +4,19 @@ use axum::http::{HeaderMap, Request, StatusCode};
 use axum::response::Response;
 use axum::routing::{delete, get, post, Router};
 use axum::Json;
+use axum_prometheus::metrics_exporter_prometheus::PrometheusHandle;
 use axum_prometheus::PrometheusMetricLayer;
 use database_schema::diesel_async::pooled_connection::deadpool::Object;
 use database_schema::timestamp::SerializableTimestamp;
 use database_schema::{
-    accounts, notification_settings, notifications, users, NewUser, Notification, User,
-    UserAccount, UserSetting,
+    accounts, notification_settings, notifications, run_migrations, users, NewUser, Notification, User, UserAccount, UserSetting
 };
 use diesel::prelude::*;
 use diesel_async::pooled_connection::deadpool::Pool;
 use diesel_async::pooled_connection::AsyncDieselConnectionManager;
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use lazy_static::lazy_static;
-use prometheus::{self, register_int_gauge, IntGauge};
+use prometheus::{self, register_int_gauge, Encoder, IntGauge, TextEncoder};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -51,6 +51,7 @@ lazy_static! {
 struct AxumState {
     pool: Pool<AsyncPgConnection>,
     kv_store: async_nats::jetstream::kv::Store,
+    metric_handle: PrometheusHandle,
 }
 
 async fn get_or_create_user(
@@ -162,7 +163,7 @@ async fn delete_notification(
 #[axum::debug_handler]
 /// Update the entire settings bundle for a user in one go
 async fn update_settings(
-    State(AxumState { pool, kv_store }): State<AxumState>,
+    State(AxumState { pool, kv_store , ..}): State<AxumState>,
     Path(fcm_token): Path<String>,
     Json(payload): Json<UserSettings>,
 ) -> Result<String, StatusCode> {
@@ -306,7 +307,7 @@ async fn update_settings(
 
 #[axum::debug_handler]
 async fn delete_settings(
-    State(AxumState { pool, kv_store }): State<AxumState>,
+    State(AxumState { pool, kv_store , ..}): State<AxumState>,
     Path(fcm_token): Path<String>,
 ) -> Result<String, StatusCode> {
     let span = info_span!("delete_settings", fcm_token = %fcm_token);
@@ -407,6 +408,22 @@ async fn proxy_post_image(Path(url): Path<String>) -> Result<Response, StatusCod
         .unwrap())
 }
 
+
+async fn metrics(
+    State(AxumState { metric_handle, .. }): State<AxumState>,
+) -> String {
+    let mut buffer = vec![];
+    let encoder = TextEncoder::new();
+    let metric_families = prometheus::gather();
+    encoder.encode(&metric_families, &mut buffer).unwrap();
+    let mut metrics = String::from_utf8(buffer).unwrap() + "\n";
+
+    // add axum metrics
+    metrics += &metric_handle.render();
+
+    metrics
+}
+
 async fn _main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let loki_url = std::env::var("LOKI_URL");
     if let Ok(loki_url) = loki_url {
@@ -442,6 +459,8 @@ async fn _main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let pg_config = AsyncDieselConnectionManager::<diesel_async::AsyncPgConnection>::new(&pg_url);
     let pg_pool = Pool::builder(pg_config).build()?;
     info!("Got DB");
+
+    run_migrations()?;
 
     let mut nats_host = std::env::var("NATS_HOST").unwrap_or("localhost".to_string());
     if !nats_host.contains(':') {
@@ -485,7 +504,7 @@ async fn _main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     let axum_app = Router::new()
         .route("/", get(|| async { "Web server online." }))
-        .route("/metrics", get(|| async move { metric_handle.render() }))
+        .route("/metrics", get(metrics))
         .route("/notifications/{fcm_token}", get(get_notifications))
         .route(
             "/notifications/{fcm_token}/clear",
@@ -501,6 +520,7 @@ async fn _main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .with_state(AxumState {
             pool: pg_pool.clone(),
             kv_store: kv_store.clone(),
+            metric_handle: metric_handle.clone(),
         })
         .layer(GovernorLayer {
             config: governor_conf,

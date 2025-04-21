@@ -5,10 +5,9 @@ use axum::response::Response;
 use axum::{routing::get, Router};
 use bluesky_utils::get_following;
 use bluesky_utils::parse_created_at;
-use database_schema::{account_follows, AccountFollow, DBPool, NewAccountFollow};
+use database_schema::{account_follows, run_migrations, AccountFollow, DBPool, NewAccountFollow};
 use diesel::dsl::exists;
 use diesel::dsl::not;
-use diesel::pg;
 use diesel::prelude::*;
 use diesel_async::pooled_connection::deadpool::Pool;
 use diesel_async::pooled_connection::AsyncDieselConnectionManager;
@@ -639,6 +638,8 @@ async fn _main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let pg_config = AsyncDieselConnectionManager::<diesel_async::AsyncPgConnection>::new(&pg_url);
     let pg_pool = Pool::builder(pg_config).build()?;
     info!("Got DB");
+
+    run_migrations()?;
 
     let mut nats_host = std::env::var("NATS_HOST").unwrap_or("localhost".to_string());
     if !nats_host.contains(':') {
