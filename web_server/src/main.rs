@@ -210,6 +210,7 @@ async fn update_settings(
                     user_id: user.id,
                     account_did: account.account_did.clone(),
                     created_at: now,
+                    too_many_follows: false,
                 };
                 diesel::insert_into(accounts::table)
                     .values(new_account)

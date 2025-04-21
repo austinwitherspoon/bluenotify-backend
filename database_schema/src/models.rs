@@ -93,6 +93,7 @@ pub struct UserAccount {
     pub user_id: i32,
     pub account_did: String,
     pub created_at: SerializableTimestamp,
+    pub too_many_follows: bool,
 }
 
 

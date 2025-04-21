@@ -85,6 +85,7 @@ async fn send_user_settings_to_db(
             user_id: user.id,
             account_did: account.clone(),
             created_at: now,
+            too_many_follows: false,
         })
         .collect::<Vec<_>>();
     diesel::insert_into(database_schema::schema::accounts::table)
