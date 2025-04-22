@@ -5,7 +5,7 @@ use async_nats::jetstream::Message;
 use axum::{routing::get, Router};
 use bluesky_utils::{bluesky_browseable_url, parse_created_at, parse_uri};
 use diesel::dsl::exists;
-use futures::TryStreamExt;
+use futures::{StreamExt, TryStreamExt};
 use lazy_static::lazy_static;
 use prometheus::{
     self, register_histogram, register_int_counter, register_int_gauge, Encoder, Histogram,
@@ -930,14 +930,50 @@ async fn send_notification(
     if let Some(image) = image {
         message["message"]["notification"]["image"] = Value::String(image);
     }
-    for fcm_token in fcm_recipients {
-        message["message"]["token"] = Value::String(fcm_token.clone());
-        let response = fcm_client.send(message.clone()).await;
+
+    let futures = fcm_recipients
+        .into_iter()
+        .map(|fcm_token| {
+            let fcm_client = fcm_client.clone();
+            let pg = pg.clone();
+            let fcm_token = fcm_token.clone();
+
+            let mut message = message.clone();
+            message["message"]["token"] = Value::String(fcm_token.clone());
+
+            async move {
+                for _ in 0..15 {
+                    let fcm_client = fcm_client.clone();
+                    let pg = pg.clone();
+                    let fcm_token = fcm_token.clone();
+                    let message = message.clone();
+                    let result = send_single_notification(fcm_token, message, fcm_client, pg).await;
+                    if result.is_ok() {
+                        break;
+                    } else {
+                        warn!("Error sending notification, trying again in a few seconds: {:?}", result);
+                        tokio::time::sleep(Duration::from_secs(15)).await;
+                    }
+                }
+                
+            }
+        });
+    let stream = futures::stream::iter(futures).buffer_unordered(10);
+    stream.collect::<Vec<_>>().await;
+}
+
+async fn send_single_notification(
+    fcm_token: String,
+    message: serde_json::Value,
+    fcm_client: Arc<FcmClient>,
+    pg: DBPool,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let response = fcm_client.send(message.clone()).await;
         match response {
             Ok(_) => {
                 info!("Notification sent successfully to {:?}", fcm_token);
             }
-            Err(e) => match e {
+            Err(error) => match &error {
                 fcm::FcmError::ResponseError(e) => {
                     if e.error.code == 404 {
                         warn!("FCM token not found, user deleted. Removing from database.");
@@ -954,17 +990,20 @@ async fn send_notification(
                         warn!("Token {:?}", fcm_token);
                         warn!("Payload: {:?}", message);
                         error!("Error sending notification: {:?}", e);
+                        return Err(error.into());
                     }
                 }
                 _ => {
                     warn!("Token {:?}", fcm_token);
                     warn!("Payload: {:?}", message);
-                    error!("Unknown Error sending notification: {:?}", e);
+                    error!("Unknown Error sending notification: {:?}", error);
+                    return Err(error.into());
                 }
             },
         }
+
+        Ok(())
     }
-}
 
 async fn listen_to_posts(
     posts_stream: Stream,
