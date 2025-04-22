@@ -4,6 +4,7 @@ use async_nats::jetstream::stream::Stream;
 use async_nats::jetstream::Message;
 use axum::{routing::get, Router};
 use bluesky_utils::{bluesky_browseable_url, parse_created_at, parse_uri};
+use diesel::dsl::exists;
 use futures::TryStreamExt;
 use lazy_static::lazy_static;
 use prometheus::{
@@ -295,137 +296,6 @@ async fn get_bluesky_display_name_and_handle(
     Ok(result)
 }
 
-async fn get_following(
-    did: &str,
-    client: Option<reqwest::Client>,
-    cache: Option<Store>,
-) -> Result<HashSet<String>, Box<dyn std::error::Error + Send + Sync>> {
-    let cache_key = format!("following.{}", did.replace(":", "_"));
-
-    if let Some(cache) = cache.clone() {
-        debug!(
-            "Checking cache for following for {:?}: Key: {:?}",
-            did, cache_key
-        );
-        let cached = cache.get(&cache_key).await;
-        if let Ok(cached) = cached {
-            if let Some(cached) = cached {
-                let cached = String::from_utf8(cached.into());
-                if cached.is_err() {
-                    let msg: String = cached.unwrap_err().to_string();
-                    error!("Error getting following, corrupt cache: {}", msg);
-                } else {
-                    debug!("Using cached following for {:?}", did);
-                    let following: HashSet<String> =
-                        serde_json::from_str(&cached.unwrap()).unwrap();
-                    return Ok(following);
-                }
-            } else {
-                debug!("No cached following for {:?}", did);
-            }
-        } else {
-            let msg: String = cached.unwrap_err().to_string();
-            error!("Error getting following from cache: {}", msg);
-        }
-    }
-
-    info!("Getting following for {:?}", did);
-    let start = chrono::Utc::now();
-    let client = client.unwrap_or_else(|| reqwest::Client::new());
-
-    // First check and make sure they have less than 10,000 following, otherwise ignore
-    // since this will choke the post in our system
-    let profile_url = format!(
-        "https://public.api.bsky.app/xrpc/app.bsky.actor.getProfile?actor={}",
-        did
-    );
-
-    let response = client.get(&profile_url).send().await;
-    if response.is_err() {
-        let msg: String = response.unwrap_err().to_string();
-        error!("Error getting profile: {}", msg);
-        return Err(msg.into());
-    }
-    let response = response.unwrap();
-    if !response.status().is_success() {
-        let status: String = response.error_for_status_ref().unwrap_err().to_string();
-        let response_json: Result<Value, _> = response.json().await;
-        if let Ok(json) = response_json {
-            let error = json["error"].as_str();
-            if let Some(error_text) = error {
-                match error_text {
-                    "AccountTakedown" | "AccountDeactivated" => {
-                        return Ok(HashSet::new());
-                    }
-                    _ => {
-                        let msg: String = format!("Error getting profile: {}", error_text);
-                        error!("{}", msg);
-                        return Err(msg.into());
-                    }
-                }
-            }
-        }
-        error!("Error getting profile: {}", status);
-        return Err(status.into());
-    }
-
-    let json: Result<Value, _> = response.json().await;
-    let mut following_count = 0;
-    if let Ok(json) = json {
-        following_count = json["followsCount"].as_u64().unwrap_or(0);
-    }
-    if following_count > 10_000 {
-        return Ok(HashSet::new());
-    }
-
-    let mut cursor: Option<String> = None;
-    let mut following = HashSet::new();
-    loop {
-        let url = format!(
-            "https://public.api.bsky.app/xrpc/app.bsky.graph.getFollows?actor={}&limit=100&cursor={}",
-            did,
-            cursor.clone().unwrap_or_default()
-        );
-        debug!("Getting following from {:?}", url);
-        let response = client.get(&url).send().await;
-        if response.is_err() {
-            let msg: String = response.unwrap_err().to_string();
-            error!("Error getting following: {}", msg);
-            return Err(msg.into());
-        }
-        let response = response.unwrap();
-        if !response.status().is_success() {
-            let msg: String = response.error_for_status().unwrap_err().to_string();
-            error!("Error getting following: {}", msg);
-            return Err(msg.into());
-        }
-        let json: Value = response.json().await.unwrap();
-        for follower in json["follows"].as_array().unwrap() {
-            following.insert(follower["did"].as_str().unwrap().to_string());
-        }
-        let cursor_value = json["cursor"].as_str();
-        if cursor_value.is_none() {
-            break;
-        }
-        cursor = Some(cursor_value.unwrap().to_string());
-    }
-
-    let end = chrono::Utc::now();
-    let duration = end - start;
-    debug!("Got following for {:?} in {:?}", did, duration);
-
-    if let Some(cache) = cache {
-        _ = cache
-            .put(
-                &cache_key,
-                serde_json::to_string(&following).unwrap().into(),
-            )
-            .await;
-    }
-
-    Ok(following)
-}
-
 async fn load_bluesky_post(
     uri: &str,
     client: Option<reqwest::Client>,
@@ -531,143 +401,6 @@ async fn load_post_image(
     Ok(None)
 }
 
-async fn check_possible_recipient(
-    possible_recipient: String,
-    user_settings: database_schema::models::UserSetting,
-    post_type: PostType,
-    post: &JetstreamPost,
-    record: &PostRecord,
-    retry: RetryPolicy,
-    client: Option<reqwest::Client>,
-    cache: Store,
-) -> (String, bool) {
-    if let Some(allowed_words) = user_settings.word_allow_list {
-        if !allowed_words.is_empty() {
-            let mut found = false;
-            for word in allowed_words.iter() {
-                if record.text.to_lowercase().contains(&word.to_lowercase()) {
-                    found = true;
-                    break;
-                }
-            }
-            if !found {
-                return (possible_recipient, false);
-            }
-        }
-    }
-
-    if let Some(blocked_words) = user_settings.word_block_list {
-        for word in blocked_words.iter() {
-            if record.text.to_lowercase().contains(&word.to_lowercase()) {
-                return (possible_recipient, false);
-            }
-        }
-    }
-
-    match post_type {
-        PostType::Post | PostType::Quote => {
-            if !user_settings
-                .post_type
-                .contains(&database_schema::models::NotificationType::Post)
-            {
-                return (possible_recipient, false);
-            }
-        }
-        PostType::Repost => {
-            if !user_settings
-                .post_type
-                .contains(&database_schema::models::NotificationType::Repost)
-            {
-                return (possible_recipient, false);
-            }
-        }
-        PostType::Reply => {
-            if user_settings
-                .post_type
-                .contains(&database_schema::models::NotificationType::Reply)
-            {
-                return (possible_recipient, true);
-            } else if user_settings
-                .post_type
-                .contains(&database_schema::models::NotificationType::ReplyToFriend)
-            {
-                let parent_poster_did = match &post.commit.record {
-                    Record::Post(record) => {
-                        let uri = record.reply.as_ref().unwrap().parent.uri.clone();
-                        parse_uri(&uri).unwrap().0
-                    }
-                    _ => return (possible_recipient, false),
-                };
-                debug!(
-                    "Checking if {:?} follows {:?}",
-                    possible_recipient, parent_poster_did
-                );
-                let following = retry
-                    .retry(|| {
-                        timeout(
-                            Duration::from_secs(60),
-                            get_following(
-                                user_settings.user_account_did.as_str(),
-                                client.clone(),
-                                Some(cache.clone()),
-                            ),
-                        )
-                    })
-                    .await;
-                if following.is_err() {
-                    error!(
-                        "Timed out getting following for {:?}!",
-                        user_settings.user_account_did
-                    );
-                    return (possible_recipient, false);
-                }
-                let following = following.unwrap().unwrap_or_default();
-                if !following.contains(&parent_poster_did) {
-                    return (possible_recipient, false);
-                }
-            } else {
-                return (possible_recipient, false);
-            }
-        }
-    };
-    (possible_recipient, true)
-}
-
-async fn get_all_possible_recipients(
-    poster_did: String,
-    post_type: PostType,
-    pg: DBPool,
-) -> Result<
-    Vec<(String, database_schema::models::UserSetting)>,
-    Box<dyn std::error::Error + Send + Sync>,
-> {
-    let mut con = pg.get().await?;
-
-    let db_post_type = match post_type {
-        PostType::Post => vec![database_schema::models::NotificationType::Post],
-        PostType::Quote => vec![database_schema::models::NotificationType::Post],
-        PostType::Repost => vec![database_schema::models::NotificationType::Repost],
-        PostType::Reply => vec![
-            database_schema::models::NotificationType::Reply,
-            database_schema::models::NotificationType::ReplyToFriend,
-        ],
-    };
-
-    use database_schema::schema::{notification_settings, users};
-
-    Ok(notification_settings::table
-        .inner_join(users::table)
-        .filter(notification_settings::following_did.eq(poster_did))
-        .filter(notification_settings::post_type.overlaps_with(db_post_type))
-        .filter(users::deleted_at.is_null())
-        .select((
-            users::fcm_token,
-            <database_schema::models::UserSetting>::as_select(),
-        ))
-        .load::<(String, database_schema::models::UserSetting)>(&mut con)
-        .await?)
-}
-
 async fn process_post(
     post: JetstreamPost,
     nats_message: Option<Message>,
@@ -741,58 +474,128 @@ async fn process_post(
 
     // check if this post has any interested listeners BEFORE downloading anything else
     let fcm_recipients: HashSet<String> = {
-        let possible_recipients =
-            get_all_possible_recipients(poster_did.clone(), post_type.clone(), pg.clone()).await;
-
-        debug!(
-            "Possible recipients for {:?}: {:?}",
-            poster_did, possible_recipients
-        );
-
-        if possible_recipients.is_err() {
-            error!(
-                "Error getting possible recipients: {:?}",
-                possible_recipients
-            );
+        let con = pg.get().await;
+        if con.is_err() {
+            error!("Error getting connection");
             return;
         }
+        let mut con = con.unwrap();
 
-        let possible_recipients = possible_recipients.unwrap();
+        use database_schema::schema::{notification_settings, users};
 
-        let mut task_group = tokio::task::JoinSet::new();
-        for (possible_recipient, settings) in possible_recipients.iter() {
-            let post_type = post_type.clone();
-            let post = post.clone();
-            let possible_recipient = possible_recipient.clone();
-            let retry = retry.clone();
-            let client = client.clone();
-            let cache = cache.clone();
-            let settings = settings.clone();
-            let record = source_post_record.clone();
-            task_group.spawn(async move {
-                check_possible_recipient(
-                    possible_recipient,
-                    settings.clone(),
-                    post_type,
-                    &post,
-                    &record,
-                    retry.clone(),
-                    Some(client.clone()),
-                    cache.clone(),
-                )
-                .await
-            });
-        }
+        let relevant_users = match post_type {
+            PostType::Post | PostType::Quote | PostType::Repost => {
+                let poster_did = poster_did.clone();
+                let db_post_type = match post_type {
+                    PostType::Post => vec![database_schema::models::NotificationType::Post],
+                    PostType::Quote => vec![database_schema::models::NotificationType::Post],
+                    PostType::Repost => vec![database_schema::models::NotificationType::Repost],
+                    _ => unreachable!(),
+                };
+                let results = notification_settings::table
+                    .inner_join(users::table)
+                    .filter(notification_settings::following_did.eq(poster_did))
+                    .filter(notification_settings::post_type.overlaps_with(db_post_type))
+                    .filter(users::deleted_at.is_null())
+                    .select((
+                        users::fcm_token,
+                        <database_schema::models::UserSetting>::as_select(),
+                    ))
+                    .load::<(String, database_schema::models::UserSetting)>(&mut con)
+                    .await;
+                if results.is_err() {
+                    error!("Error loading users: {:?}", results);
+                    return;
+                }
+                results.unwrap()
+            }
+            PostType::Reply => {
+                let poster_did = poster_did.clone();
+                let parent_poster_did = match &post.commit.record {
+                    Record::Post(record) => {
+                        let uri = record.reply.as_ref().unwrap().parent.uri.clone();
+                        parse_uri(&uri).unwrap().0
+                    }
+                    _ => return,
+                };
+
+                let results = notification_settings::table
+                    .inner_join(users::table)
+                    .filter(notification_settings::following_did.eq(poster_did))
+                    .filter(
+                        notification_settings::post_type.overlaps_with(
+                                vec![
+                                    database_schema::models::NotificationType::Reply,
+                                ],
+                            ).or(
+                            notification_settings::post_type.overlaps_with(
+                                vec![
+                                    database_schema::models::NotificationType::ReplyToFriend,
+                                ],
+                            ).and(exists(
+                                database_schema::schema::account_follows::table.filter(
+                                    database_schema::schema::account_follows::dsl::account_did
+                                        .eq(database_schema::schema::notification_settings::dsl::user_account_did),
+                                ).filter(
+                                    database_schema::schema::account_follows::dsl::follow_did
+                                        .eq(parent_poster_did),
+                                ),
+                            )))
+                    )
+                    .filter(users::deleted_at.is_null())
+                    .select((
+                        users::fcm_token,
+                        <database_schema::models::UserSetting>::as_select(),
+                    ))
+                    .load::<(String, database_schema::models::UserSetting)>(&mut con)
+                    .await;
+                if results.is_err() {
+                    error!("Error loading users: {:?}", results);
+                    return;
+                }
+                results.unwrap()
+            }
+        };
 
         let mut results = HashSet::new();
-
-        while let Some(result) = task_group.join_next().await {
-            let (recipient, should_notify) = result.unwrap();
-            if should_notify {
-                results.insert(recipient);
+        for (fcm_token, user_settings) in relevant_users.iter() {
+            if let Some(allowed_words) = &user_settings.word_allow_list {
+                if !allowed_words.is_empty() {
+                    let mut found = false;
+                    for word in allowed_words.iter() {
+                        if source_post_record
+                            .text
+                            .to_lowercase()
+                            .contains(&word.to_lowercase())
+                        {
+                            found = true;
+                            break;
+                        }
+                    }
+                    if !found {
+                        continue;
+                    }
+                }
             }
-        }
 
+            if let Some(blocked_words) = &user_settings.word_block_list {
+                let mut found = false;
+                for word in blocked_words.iter() {
+                    if source_post_record
+                        .text
+                        .to_lowercase()
+                        .contains(&word.to_lowercase())
+                    {
+                        found = true;
+                        break;
+                    }
+                }
+                if found {
+                    continue;
+                }
+            }
+            results.insert(fcm_token.clone());
+        }
         results
     };
 
@@ -1381,31 +1184,6 @@ mod tests {
         let did = "did:plc:jpkjnmydclkafjyicv3s6hcx";
         let handle = get_bluesky_display_name_and_handle(did, None, None).await;
         assert_eq!(handle.unwrap().1, "austinwitherspoon.com");
-    }
-    #[tokio::test]
-    async fn test_follows() {
-        let did = "did:plc:jpkjnmydclkafjyicv3s6hcx";
-        let follows = get_following(did, None, None).await;
-        println!("{:?}", follows);
-        assert!(follows.unwrap().len() > 60);
-
-        // Test somebody with way too many following, ignore
-        let did = "did:plc:w3xevyycvef7y4tqsojptrf5";
-        let follows = get_following(did, None, None).await;
-        println!("{:?}", follows);
-        assert!(follows.unwrap().len() == 0);
-
-        // test somebody with taken down account
-        let did = "did:plc:mxn56keus3cvwabpw4zr3f7h";
-        let follows = get_following(did, None, None).await;
-        println!("{:?}", follows);
-        assert!(follows.unwrap().len() == 0);
-
-        // test somebody with deactivated account
-        let did = "did:plc:znaukyuzxganntnzr5hgerzg";
-        let follows = get_following(did, None, None).await;
-        println!("{:?}", follows);
-        assert!(follows.unwrap().len() == 0);
     }
     #[tokio::test]
     async fn test_get_post() {
