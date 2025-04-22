@@ -978,9 +978,10 @@ async fn send_single_notification(
                     if e.error.code == 404 {
                         warn!("FCM token not found, user deleted. Removing from database.");
                         let mut con = pg.get().await.unwrap();
-                        let result = diesel::delete(database_schema::schema::users::table.filter(
+                        let result = diesel::update(database_schema::schema::users::table.filter(
                             database_schema::schema::users::dsl::fcm_token.eq(fcm_token.clone()),
                         ))
+                        .set(database_schema::schema::users::dsl::deleted_at.eq(chrono::Utc::now().naive_utc()))
                         .execute(&mut con)
                         .await;
                         if result.is_err() {
