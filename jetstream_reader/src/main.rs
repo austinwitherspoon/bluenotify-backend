@@ -392,6 +392,7 @@ async fn fill_in_missing_follows(
 
     let users_to_fill = database_schema::schema::accounts::table
         .select(database_schema::schema::accounts::dsl::account_did)
+        .filter(database_schema::schema::accounts::dsl::too_many_follows.eq(false))
         .filter(not(exists(
             database_schema::schema::account_follows::table.filter(
                 database_schema::schema::account_follows::dsl::account_did
@@ -623,6 +624,10 @@ async fn update_watched_users(
         "Updated bluenotify users: Len {:?}",
         watched_users.bluenotify_users.len()
     );
+
+    tokio::spawn(async move {
+        fill_in_missing_follows(pg_pool.clone()).await.unwrap();
+    });
 
     Ok(())
 }
