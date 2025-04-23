@@ -151,15 +151,30 @@ pub async fn get_following(
         let response_json: Result<Value, _> = response.json().await;
         if let Ok(json) = response_json {
             let error = json["error"].as_str();
+            let message = json["message"].as_str();
             if let Some(error_text) = error {
-                match error_text {
-                    "AccountTakedown" | "AccountDeactivated" => {
-                        return Err(GetFollowsError::DisabledAccount);
-                    }
-                    _ => {
-                        let msg: String = format!("Error getting profile: {}", error_text);
-                        error!("{}", msg);
-                        return Err(GetFollowsError::StatusError(status));
+                if let Some(message_text) = message {
+                    match error_text {
+                        "AccountTakedown" | "AccountDeactivated" => {
+                            return Err(GetFollowsError::DisabledAccount);
+                        }
+                        "InvalidRequest" => {
+                            match message_text {
+                                "Profile not found" => {
+                                    return Err(GetFollowsError::DisabledAccount);
+                                }
+                                _ => {
+                                    let msg: String = format!("Error getting profile: {} - {}", error_text, message_text);
+                                    error!("{}", msg);
+                                    return Err(GetFollowsError::StatusError(status));
+                                }
+                            }
+                        }
+                        _ => {
+                            let msg: String = format!("Error getting profile: {} - {}", error_text, message_text);
+                            error!("{}", msg);
+                            return Err(GetFollowsError::StatusError(status));
+                        }
                     }
                 }
             }
@@ -317,5 +332,18 @@ mod tests {
                 panic!("Expected DisabledAccount error, got {:?}", follows);
             }
         }
+
+        
+        // non-existent account
+        let did = "did:plc:aytdxezmiaweub6mek6zocmv";
+        let follows = get_following(did, None, None).await;
+        println!("{:?}", follows);
+        match follows {
+            Err(GetFollowsError::DisabledAccount) => (),
+            _ => {
+                panic!("Expected DisabledAccount error, got {:?}", follows);
+            }
+        }
+
     }
 }

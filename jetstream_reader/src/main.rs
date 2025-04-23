@@ -30,6 +30,10 @@ use tokio::time::timeout;
 use tokio_tungstenite::connect_async;
 use tracing::debug;
 use tracing::{error, info, warn};
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::Layer;
+use url::Url;
 
 const URLS: [&str; 4] = [
     "wss://jetstream1.us-west.bsky.network/subscribe",
@@ -216,33 +220,33 @@ async fn rescan_user_follows(did: String, pg_pool: DBPool) {
     let follows = get_following(&did, None, Some(std::time::Duration::from_millis(50))).await;
     if follows.is_err() {
         let error = follows.unwrap_err();
-            match error {
-                GetFollowsError::TooManyFollows(count) => {
-                    let mut conn = {
-                        let conn = pg_pool.get().await;
-                        if conn.is_err() {
-                            error!("Error getting PG from pool!");
-                            return;
-                        }
-                        conn.unwrap()
-                    };
-                    _ = diesel::update(database_schema::schema::accounts::table)
-                        .filter(database_schema::schema::accounts::dsl::account_did.eq(did.clone()))
-                        .set(database_schema::schema::accounts::dsl::too_many_follows.eq(true))
-                        .execute(&mut conn)
-                        .await;
-                    error!("Too many follows for {}: {}", did, count);
-                    return;
-                }
-                GetFollowsError::DisabledAccount => {
-                    error!("User disabled: {}", did);
-                    return;
-                }
-                _ => {
-                    error!("Error getting follows: {:?}", error);
-                    return;
-                }
+        match error {
+            GetFollowsError::TooManyFollows(count) => {
+                let mut conn = {
+                    let conn = pg_pool.get().await;
+                    if conn.is_err() {
+                        error!("Error getting PG from pool!");
+                        return;
+                    }
+                    conn.unwrap()
+                };
+                _ = diesel::update(database_schema::schema::accounts::table)
+                    .filter(database_schema::schema::accounts::dsl::account_did.eq(did.clone()))
+                    .set(database_schema::schema::accounts::dsl::too_many_follows.eq(true))
+                    .execute(&mut conn)
+                    .await;
+                error!("Too many follows for {}: {}", did, count);
+                return;
             }
+            GetFollowsError::DisabledAccount => {
+                error!("User disabled: {}", did);
+                return;
+            }
+            _ => {
+                error!("Error getting follows: {:?}", error);
+                return;
+            }
+        }
     }
     let follows = follows.unwrap();
     let mut conn = {
@@ -300,6 +304,7 @@ async fn rescan_user_follows(did: String, pg_pool: DBPool) {
     }
     diesel::insert_into(account_follows::table)
         .values(new_follows)
+        .on_conflict_do_nothing()
         .execute(&mut conn)
         .await
         .unwrap();
@@ -638,7 +643,11 @@ async fn listen_to_watched_forever(
     watched_users: SharedWatchedUsers,
     pg_pool: DBPool,
 ) {
-    let result = timeout(Duration::from_secs(30), update_watched_users(watched_users.clone(), pg_pool.clone())).await;
+    let result = timeout(
+        Duration::from_secs(30),
+        update_watched_users(watched_users.clone(), pg_pool.clone()),
+    )
+    .await;
     match result {
         Ok(Ok(_)) => {}
         Ok(Err(e)) => {
@@ -657,7 +666,11 @@ async fn listen_to_watched_forever(
         }
         let mut messages = messages.unwrap();
         while let Ok(Some(_message)) = messages.try_next().await {
-            let result = timeout(Duration::from_secs(30), update_watched_users(watched_users.clone(), pg_pool.clone())).await;
+            let result = timeout(
+                Duration::from_secs(30),
+                update_watched_users(watched_users.clone(), pg_pool.clone()),
+            )
+            .await;
             match result {
                 Ok(Ok(_)) => {}
                 Ok(Err(e)) => {
@@ -700,7 +713,34 @@ async fn rescan_missing(
 }
 
 async fn _main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    tracing_subscriber::fmt::init();
+    let loki_url = std::env::var("LOKI_URL");
+    if let Ok(loki_url) = loki_url {
+        let environment = std::env::var("ENVIRONMENT").unwrap_or("dev".to_string());
+        let (layer, task) = tracing_loki::builder()
+            .label("environment", environment)?
+            .label("service_name", "jetstream")?
+            .extra_field("pid", format!("{}", std::process::id()))?
+            .build_url(Url::parse(&loki_url).unwrap())?;
+
+        tracing_subscriber::registry()
+            .with(layer.with_filter(tracing_subscriber::filter::EnvFilter::from_default_env()))
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .with_writer(std::io::stdout)
+                    .with_filter(tracing_subscriber::filter::EnvFilter::from_default_env()),
+            )
+            .with(sentry_tracing::layer())
+            .init();
+
+        tokio::spawn(task);
+        tracing::info!("jetstream starting, loki tracing enabled.");
+    } else {
+        warn!("LOKI_URL not set, will not send logs to Loki");
+        tracing_subscriber::registry()
+            .with(tracing_subscriber::fmt::layer())
+            .with(sentry_tracing::layer())
+            .init();
+    }
 
     info!("Starting up Bluesky Jetstream Reader.");
 
