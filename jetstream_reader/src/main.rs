@@ -230,16 +230,36 @@ async fn rescan_user_follows(did: String, pg_pool: DBPool) {
                     }
                     conn.unwrap()
                 };
-                _ = diesel::update(database_schema::schema::accounts::table)
+                let result = diesel::update(database_schema::schema::accounts::table)
                     .filter(database_schema::schema::accounts::dsl::account_did.eq(did.clone()))
                     .set(database_schema::schema::accounts::dsl::too_many_follows.eq(true))
                     .execute(&mut conn)
                     .await;
+                if let Err(e) = result {
+                    error!("Error updating too_many_follows: {:?}", e);
+                    return;
+                }
                 warn!("Too many follows for {}: {}", did, count);
                 return;
             }
             GetFollowsError::DisabledAccount => {
-                info!("User disabled: {}", did);
+                info!("User disabled, deleting account: {}", did);
+                let mut conn = {
+                    let conn = pg_pool.get().await;
+                    if conn.is_err() {
+                        error!("Error getting PG from pool!");
+                        return;
+                    }
+                    conn.unwrap()
+                };
+                let result = diesel::delete(database_schema::schema::accounts::table)
+                    .filter(database_schema::schema::accounts::dsl::account_did.eq(did.clone()))
+                    .execute(&mut conn)
+                    .await;
+                if let Err(e) = result {
+                    error!("Error deleting account: {:?}", e);
+                    return;
+                }
                 return;
             }
             _ => {
