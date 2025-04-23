@@ -638,7 +638,16 @@ async fn listen_to_watched_forever(
     watched_users: SharedWatchedUsers,
     pg_pool: DBPool,
 ) {
-    _ = update_watched_users(watched_users.clone(), pg_pool.clone()).await;
+    let result = timeout(Duration::from_secs(30), update_watched_users(watched_users.clone(), pg_pool.clone())).await;
+    match result {
+        Ok(Ok(_)) => {}
+        Ok(Err(e)) => {
+            error!("Error updating watched users on startup: {:?}", e);
+        }
+        Err(_) => {
+            error!("Timeout waiting for watched users on startup.");
+        }
+    }
     loop {
         let messages = kv_store.watch("watched_users").await;
         if messages.is_err() {
@@ -648,7 +657,16 @@ async fn listen_to_watched_forever(
         }
         let mut messages = messages.unwrap();
         while let Ok(Some(_message)) = messages.try_next().await {
-            _ = update_watched_users(watched_users.clone(), pg_pool.clone()).await;
+            let result = timeout(Duration::from_secs(30), update_watched_users(watched_users.clone(), pg_pool.clone())).await;
+            match result {
+                Ok(Ok(_)) => {}
+                Ok(Err(e)) => {
+                    error!("Error updating watched users: {:?}", e);
+                }
+                Err(_) => {
+                    error!("Timeout waiting for watched users.");
+                }
+            }
         }
     }
 }
