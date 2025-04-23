@@ -235,11 +235,11 @@ async fn rescan_user_follows(did: String, pg_pool: DBPool) {
                     .set(database_schema::schema::accounts::dsl::too_many_follows.eq(true))
                     .execute(&mut conn)
                     .await;
-                error!("Too many follows for {}: {}", did, count);
+                warn!("Too many follows for {}: {}", did, count);
                 return;
             }
             GetFollowsError::DisabledAccount => {
-                error!("User disabled: {}", did);
+                info!("User disabled: {}", did);
                 return;
             }
             _ => {
@@ -444,7 +444,7 @@ async fn connect_and_listen(
     loop {
         let frame = timeout(Duration::from_secs(10), read.next()).await;
         if frame.is_err() {
-            error!("Frame timed out after 10 seconds: {:?}", frame);
+            warn!("Frame timed out after 10 seconds: {:?}", frame);
             break;
         }
         let frame = frame.unwrap();
@@ -737,7 +737,11 @@ async fn _main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     } else {
         warn!("LOKI_URL not set, will not send logs to Loki");
         tracing_subscriber::registry()
-            .with(tracing_subscriber::fmt::layer())
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .with_writer(std::io::stdout)
+                    .with_filter(tracing_subscriber::filter::EnvFilter::from_default_env()),
+            )
             .with(sentry_tracing::layer())
             .init();
     }
