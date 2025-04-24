@@ -617,27 +617,77 @@ async fn update_watched_users(
     pg_pool: DBPool,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut conn = {
-        let conn = pg_pool.get().await;
-        if conn.is_err() {
-            error!("Error getting PG from pool!");
-            return Err("Error getting PG from pool!".into());
+        let conn = timeout(
+            Duration::from_secs(30),
+            pg_pool.get()
+        ).await;
+
+        match conn {
+            Ok(Ok(conn)) => conn,
+            Ok(Err(e)) => {
+                error!("Error getting PG from pool: {:?}", e);
+                return Err("Error getting PG from pool!".into());
+            }
+            Err(_) => {
+                error!("Timeout getting PG from pool!");
+                return Err("Timeout getting PG from pool!".into());
+            }
         }
-        conn.unwrap()
     };
 
-    let actual_watched_users = database_schema::schema::notification_settings::table
+    let actual_watched_users = timeout(
+        Duration::from_secs(30),
+        database_schema::schema::notification_settings::table
         .select(database_schema::schema::notification_settings::dsl::following_did)
         .distinct()
         .load::<String>(&mut conn)
-        .await?;
+    )
+        .await;
 
-    let bluenotify_users = database_schema::schema::accounts::table
+    let actual_watched_users = match actual_watched_users {
+        Ok(Ok(users)) => users,
+        Ok(Err(e)) => {
+            error!("Error getting watched users: {:?}", e);
+            return Err("Error getting watched users!".into());
+        }
+        Err(_) => {
+            error!("Timeout getting watched users!");
+            return Err("Timeout getting watched users!".into());
+        }
+    };
+
+    let bluenotify_users = timeout(
+        Duration::from_secs(30),
+        database_schema::schema::accounts::table
         .select(database_schema::schema::accounts::dsl::account_did)
         .distinct()
         .load::<String>(&mut conn)
-        .await?;
+    )
+        .await;
 
-    let mut watched_users = watched_users.write().await;
+    let bluenotify_users = match bluenotify_users {
+        Ok(Ok(users)) => users,
+        Ok(Err(e)) => {
+            error!("Error getting bluenotify users: {:?}", e);
+            return Err("Error getting bluenotify users!".into());
+        }
+        Err(_) => {
+            error!("Timeout getting bluenotify users!");
+            return Err("Timeout getting bluenotify users!".into());
+        }
+    };
+
+    let watched_users = timeout(
+        Duration::from_secs(30),
+        watched_users.write()).await;
+        
+    let mut watched_users = match watched_users {
+        Ok(watched_users) => watched_users,
+        Err(_) => {
+            error!("Error getting watched users lock!");
+            return Err("Error getting watched users lock!".into());
+        }
+    };
     watched_users.watched_users = actual_watched_users.into_iter().collect();
     watched_users.bluenotify_users = bluenotify_users.into_iter().collect();
 
@@ -664,7 +714,7 @@ async fn listen_to_watched_forever(
     pg_pool: DBPool,
 ) {
     let result = timeout(
-        Duration::from_secs(30),
+        Duration::from_secs(45),
         update_watched_users(watched_users.clone(), pg_pool.clone()),
     )
     .await;
