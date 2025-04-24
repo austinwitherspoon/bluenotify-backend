@@ -358,6 +358,8 @@ async fn handle_follow_event(event: JetstreamFollowEvent, pg_pool: DBPool) {
                     }
                 }
                 Err(_) => {
+                    error!("Error getting too_many_follows: {:?}", too_many_follows);
+                    tokio::time::sleep(Duration::from_secs(1)).await;
                     continue;
                 }
             }
@@ -406,27 +408,28 @@ async fn handle_follow_event(event: JetstreamFollowEvent, pg_pool: DBPool) {
 async fn fill_in_missing_follows(
     pg_pool: DBPool,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let mut conn = {
-        let conn = pg_pool.get().await;
-        if conn.is_err() {
-            error!("Error getting PG from pool!");
-            return Err("Error getting PG from pool!".into());
-        }
-        conn.unwrap()
+    let users_to_fill = {
+        let mut conn = {
+            let conn = pg_pool.get().await;
+            if conn.is_err() {
+                error!("Error getting PG from pool!");
+                return Err("Error getting PG from pool!".into());
+            }
+            conn.unwrap()
+        };
+        database_schema::schema::accounts::table
+            .select(database_schema::schema::accounts::dsl::account_did)
+            .filter(database_schema::schema::accounts::dsl::too_many_follows.eq(false))
+            .filter(not(exists(
+                database_schema::schema::account_follows::table.filter(
+                    database_schema::schema::account_follows::dsl::account_did
+                        .eq(database_schema::schema::accounts::dsl::account_did),
+                ),
+            )))
+            .distinct()
+            .load::<String>(&mut conn)
+            .await?
     };
-
-    let users_to_fill = database_schema::schema::accounts::table
-        .select(database_schema::schema::accounts::dsl::account_did)
-        .filter(database_schema::schema::accounts::dsl::too_many_follows.eq(false))
-        .filter(not(exists(
-            database_schema::schema::account_follows::table.filter(
-                database_schema::schema::account_follows::dsl::account_did
-                    .eq(database_schema::schema::accounts::dsl::account_did),
-            ),
-        )))
-        .distinct()
-        .load::<String>(&mut conn)
-        .await?;
 
     info!(
         "Filling in missing follows for {} users",
@@ -434,7 +437,14 @@ async fn fill_in_missing_follows(
     );
 
     for user in users_to_fill {
-        rescan_user_follows(user, pg_pool.clone()).await;
+        let result = timeout(
+            Duration::from_secs(60*2),
+            rescan_user_follows(user, pg_pool.clone())
+        ).await;
+        if result.is_err() {
+            error!("Error filling in missing follows: {:?}", result);
+            continue;
+        }
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
 
@@ -529,19 +539,21 @@ async fn connect_and_listen(
             if format!("{:?}", post).contains("missing field `cid`") {
                 continue;
             }
-            error!("Error deserializing post: {:?}", post);
+            error!("Error deserializing post: {:?}", text);
             continue;
         }
         let post = post.unwrap();
         let post_time = post.post_datetime();
         if post_time.is_none() {
-            error!("Error getting time: {:?}", post_time);
+            info!("Post: {:?}", post);
+            error!("Error getting post_time: {:?}", post_time);
             continue;
         }
         let post_time = post_time.unwrap();
         let event_time = post.event_datetime();
         if event_time.is_none() {
-            error!("Error getting time: {:?}", event_time);
+            info!("Post: {:?}", post);
+            error!("Error getting event_time: {:?}", event_time);
             continue;
         }
         let event_time = event_time.unwrap();
@@ -617,10 +629,7 @@ async fn update_watched_users(
     pg_pool: DBPool,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut conn = {
-        let conn = timeout(
-            Duration::from_secs(30),
-            pg_pool.get()
-        ).await;
+        let conn = timeout(Duration::from_secs(30), pg_pool.get()).await;
 
         match conn {
             Ok(Ok(conn)) => conn,
@@ -638,11 +647,11 @@ async fn update_watched_users(
     let actual_watched_users = timeout(
         Duration::from_secs(30),
         database_schema::schema::notification_settings::table
-        .select(database_schema::schema::notification_settings::dsl::following_did)
-        .distinct()
-        .load::<String>(&mut conn)
+            .select(database_schema::schema::notification_settings::dsl::following_did)
+            .distinct()
+            .load::<String>(&mut conn),
     )
-        .await;
+    .await;
 
     let actual_watched_users = match actual_watched_users {
         Ok(Ok(users)) => users,
@@ -659,11 +668,11 @@ async fn update_watched_users(
     let bluenotify_users = timeout(
         Duration::from_secs(30),
         database_schema::schema::accounts::table
-        .select(database_schema::schema::accounts::dsl::account_did)
-        .distinct()
-        .load::<String>(&mut conn)
+            .select(database_schema::schema::accounts::dsl::account_did)
+            .distinct()
+            .load::<String>(&mut conn),
     )
-        .await;
+    .await;
 
     let bluenotify_users = match bluenotify_users {
         Ok(Ok(users)) => users,
@@ -677,10 +686,8 @@ async fn update_watched_users(
         }
     };
 
-    let watched_users = timeout(
-        Duration::from_secs(30),
-        watched_users.write()).await;
-        
+    let watched_users = timeout(Duration::from_secs(30), watched_users.write()).await;
+
     let mut watched_users = match watched_users {
         Ok(watched_users) => watched_users,
         Err(_) => {
