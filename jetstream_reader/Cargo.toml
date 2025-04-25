@@ -6,6 +6,7 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+again = "0.1.2"
 async-nats = "0.38.0"
 axum = { version = "0.8.1", features = ["macros"] }
 chrono = "0.4.39"
