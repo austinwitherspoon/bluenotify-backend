@@ -931,33 +931,34 @@ async fn send_notification(
         message["message"]["notification"]["image"] = Value::String(image);
     }
 
-    let futures = fcm_recipients
-        .into_iter()
-        .map(|fcm_token| {
-            let fcm_client = fcm_client.clone();
-            let pg = pg.clone();
-            let fcm_token = fcm_token.clone();
+    let futures = fcm_recipients.into_iter().map(|fcm_token| {
+        let fcm_client = fcm_client.clone();
+        let pg = pg.clone();
+        let fcm_token = fcm_token.clone();
 
-            let mut message = message.clone();
-            message["message"]["token"] = Value::String(fcm_token.clone());
+        let mut message = message.clone();
+        message["message"]["token"] = Value::String(fcm_token.clone());
 
-            async move {
-                for _ in 0..15 {
-                    let fcm_client = fcm_client.clone();
-                    let pg = pg.clone();
-                    let fcm_token = fcm_token.clone();
-                    let message = message.clone();
-                    let result = send_single_notification(fcm_token, message, fcm_client, pg).await;
-                    if result.is_ok() {
-                        break;
-                    } else {
-                        warn!("Error sending notification, trying again in a few seconds: {:?}", result);
-                        tokio::time::sleep(Duration::from_secs(15)).await;
-                    }
+        async move {
+            match again::retry(|| {
+                send_single_notification(
+                    fcm_token.clone(),
+                    message.clone(),
+                    fcm_client.clone(),
+                    pg.clone(),
+                )
+            })
+            .await
+            {
+                Ok(_) => {
+                    info!("Notification sent successfully to {:?}", fcm_token);
                 }
-                
+                Err(error) => {
+                    error!("Error sending notification: {:?}", error);
+                }
             }
-        });
+        }
+    });
     let stream = futures::stream::iter(futures).buffer_unordered(10);
     stream.collect::<Vec<_>>().await;
 }
@@ -969,42 +970,45 @@ async fn send_single_notification(
     pg: DBPool,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let response = fcm_client.send(message.clone()).await;
-        match response {
-            Ok(_) => {
-                info!("Notification sent successfully to {:?}", fcm_token);
-            }
-            Err(error) => match &error {
-                fcm::FcmError::ResponseError(e) => {
-                    if e.error.code == 404 {
-                        warn!("FCM token not found, user deleted. Removing from database.");
-                        let mut con = pg.get().await.unwrap();
-                        let result = diesel::update(database_schema::schema::users::table.filter(
-                            database_schema::schema::users::dsl::fcm_token.eq(fcm_token.clone()),
-                        ))
-                        .set(database_schema::schema::users::dsl::deleted_at.eq(chrono::Utc::now().naive_utc()))
-                        .execute(&mut con)
-                        .await;
-                        if result.is_err() {
-                            error!("Error deleting notifications: {:?}", result);
-                        }
-                    } else {
-                        warn!("Token {:?}", fcm_token);
-                        warn!("Payload: {:?}", message);
-                        error!("Error sending notification: {:?}", e);
-                        return Err(error.into());
+    match response {
+        Ok(_) => {
+            info!("Notification sent successfully to {:?}", fcm_token);
+        }
+        Err(error) => match &error {
+            fcm::FcmError::ResponseError(e) => {
+                if e.error.code == 404 {
+                    warn!("FCM token not found, user deleted. Removing from database.");
+                    let mut con = pg.get().await.unwrap();
+                    let result = diesel::update(database_schema::schema::users::table.filter(
+                        database_schema::schema::users::dsl::fcm_token.eq(fcm_token.clone()),
+                    ))
+                    .set(
+                        database_schema::schema::users::dsl::deleted_at
+                            .eq(chrono::Utc::now().naive_utc()),
+                    )
+                    .execute(&mut con)
+                    .await;
+                    if result.is_err() {
+                        error!("Error deleting notifications: {:?}", result);
                     }
-                }
-                _ => {
+                } else {
                     warn!("Token {:?}", fcm_token);
                     warn!("Payload: {:?}", message);
-                    error!("Unknown Error sending notification: {:?}", error);
+                    warn!("Error sending notification: {:?}", e);
                     return Err(error.into());
                 }
-            },
-        }
-
-        Ok(())
+            }
+            _ => {
+                warn!("Token {:?}", fcm_token);
+                warn!("Payload: {:?}", message);
+                warn!("Unknown Error sending notification: {:?}", error);
+                return Err(error.into());
+            }
+        },
     }
+
+    Ok(())
+}
 
 async fn listen_to_posts(
     posts_stream: Stream,

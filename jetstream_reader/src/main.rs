@@ -569,6 +569,10 @@ async fn connect_and_listen(
                 continue;
             }
         };
+        if post.commit.is_none() {
+            warn!("No commit, skipping: {:?}", post);
+            continue;
+        }
         let post_time = match post.post_datetime() {
             Some(time) => time,
             None => {
