@@ -207,6 +207,7 @@ struct Embed {
     embed_type: String,
     record: Option<Value>,
     media: Option<Media>,
+    external: Option<Value>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -701,8 +702,20 @@ async fn process_post(
         .embed
         .as_ref()
         .map_or(false, |embed| embed.embed_type.contains("external"));
+
+    let is_gif = (source_post_record
+        .embed)
+        .as_ref()
+        .map_or(false, |embed| embed.external.as_ref().map_or(false, |external| {
+            external["uri"].as_str().map_or(false, |uri| {
+                uri.contains(".gif")
+            })
+        }));
+
     if has_external_link {
-        if let Some(headline) = source_post.get_embed_headline() {
+        if is_gif {
+            notification_body = "[gif]".to_string();
+        } else if let Some(headline) = source_post.get_embed_headline() {
             let headline_text = format!("Link: {}", headline);
             if notification_body.is_empty() {
                 notification_body = headline_text;
@@ -880,6 +893,7 @@ async fn send_notification(
     info!("Title: {}", title);
     info!("Body: {}", body);
     info!("URL: {}", url);
+    info!("Image: {:?}", image);
     let mock = std::env::var("MOCK")
         .unwrap_or("false".to_string())
         .to_ascii_lowercase()
