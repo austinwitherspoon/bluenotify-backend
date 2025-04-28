@@ -398,6 +398,13 @@ async fn load_post_image(
     if let Some(image) = image {
         return Ok(Some(image.to_string()));
     }
+
+    // try to get embedded media thumbnail
+    let image = raw_json_response["posts"][0]["embed"]["external"]["thumb"].as_str();
+    if let Some(image) = image {
+        return Ok(Some(image.to_string()));
+    }
+
     Ok(None)
 }
 
@@ -1258,6 +1265,12 @@ mod tests {
         let image_url = load_post_image(nsfw_uri, None).await.unwrap();
         println!("{:?}", image_url);
         assert!(image_url.is_none());
+
+        let embedded_gif = "at://did:plc:kqbyr4gqt6p2l57htlsa4nha/app.bsky.feed.post/3lnuz6fqttk2g";
+        let image_url = load_post_image(embedded_gif, None).await.unwrap().unwrap();
+        println!("{:?}", image_url);
+        assert!(image_url.contains("https://cdn.bsky.app/img/feed_thumbnail/plain/"));
+
     }
 
     #[test]
