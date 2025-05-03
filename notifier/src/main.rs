@@ -186,6 +186,28 @@ struct PostRecord {
     reply: Option<ReplyData>,
 }
 
+impl PostRecord {
+    fn has_external_link(&self) -> bool {
+        self.embed.as_ref().map_or(false, |embed| embed.embed_type.contains("external"))
+    }
+
+    fn has_gif(&self) -> bool {
+        let uri: Option<String> = self.embed.as_ref().map_or(None, |embed| {
+            embed.external.as_ref().map_or(
+                embed.media.as_ref().map_or(None, |media| {
+                    media.external.as_ref().map_or(None, |external| {
+                        external["uri"].as_str().map(|uri| uri.to_string())
+                    })
+                }),
+                |external| {
+                external["uri"].as_str().map(|uri| uri.to_string())
+            })
+        });
+
+        uri.map_or(false, |uri| uri.contains(".gif"))
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 struct RepostRecord {
     #[serde(alias = "$type")]
@@ -214,6 +236,7 @@ struct Embed {
 struct Media {
     #[serde(alias = "$type")]
     media_type: String,
+    external: Option<Value>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -402,6 +425,10 @@ async fn load_post_image(
 
     // try to get embedded media thumbnail
     let image = raw_json_response["posts"][0]["embed"]["external"]["thumb"].as_str();
+    if let Some(image) = image {
+        return Ok(Some(image.to_string()));
+    }
+    let image = raw_json_response["posts"][0]["embed"]["media"]["external"]["thumb"].as_str();
     if let Some(image) = image {
         return Ok(Some(image.to_string()));
     }
@@ -698,22 +725,8 @@ async fn process_post(
             .unwrap_or(None)
     };
 
-    let has_external_link = source_post_record
-        .embed
-        .as_ref()
-        .map_or(false, |embed| embed.embed_type.contains("external"));
-
-    let is_gif = (source_post_record
-        .embed)
-        .as_ref()
-        .map_or(false, |embed| embed.external.as_ref().map_or(false, |external| {
-            external["uri"].as_str().map_or(false, |uri| {
-                uri.contains(".gif")
-            })
-        }));
-
-    if has_external_link {
-        if is_gif {
+    if source_post_record.has_external_link() {
+        if source_post_record.has_gif() {
             notification_body = "[gif]".to_string();
         } else if let Some(headline) = source_post.get_embed_headline() {
             let headline_text = format!("Link: {}", headline);
@@ -1285,6 +1298,11 @@ mod tests {
         println!("{:?}", image_url);
         assert!(image_url.contains("https://cdn.bsky.app/img/feed_thumbnail/plain/"));
 
+        let embedded_gif = "at://did:plc:wwtm5peukhmsjizz3vjkkuxb/app.bsky.feed.post/3lobqk7fihk2p";
+        let image_url = load_post_image(embedded_gif, None).await.unwrap().unwrap();
+        println!("{:?}", image_url);
+        assert!(image_url.contains("https://cdn.bsky.app/img/feed_thumbnail/plain/"));
+
     }
 
     #[test]
@@ -1337,5 +1355,28 @@ mod tests {
             headline,
             Some("Disinformation by hostile states a 'threat to democracies'".to_string())
         );
+    }
+
+    #[tokio::test]
+    async fn test_has_gif() {
+        let post_uri = "at://did:plc:kqbyr4gqt6p2l57htlsa4nha/app.bsky.feed.post/3lnuz6fqttk2g";
+        let post = match load_bluesky_post(post_uri, None).await.unwrap().commit.record {
+            Record::Post(post) => post,
+            _ => panic!("Expected a post record"),
+        };
+        println!("{:?}", post);
+        let has_gif = post.has_gif();
+        println!("Has GIF: {:?}", has_gif);
+        assert_eq!(has_gif, true);
+
+        let post_uri = "at://did:plc:wwtm5peukhmsjizz3vjkkuxb/app.bsky.feed.post/3lobqk7fihk2p";
+        let post = match load_bluesky_post(post_uri, None).await.unwrap().commit.record {
+            Record::Post(post) => post,
+            _ => panic!("Expected a post record"),
+        };
+        println!("{:?}", post);
+        let has_gif = post.has_gif();
+        println!("Has GIF: {:?}", has_gif);
+        assert_eq!(has_gif, true);
     }
 }
