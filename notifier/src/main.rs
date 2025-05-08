@@ -727,7 +727,9 @@ async fn process_post(
 
     if source_post_record.has_external_link() {
         if source_post_record.has_gif() {
-            notification_body = "[gif]".to_string();
+            if notification_body.is_empty() {
+                notification_body = "[gif]".to_string();
+            }
         } else if let Some(headline) = source_post.get_embed_headline() {
             let headline_text = format!("Link: {}", headline);
             if notification_body.is_empty() {
