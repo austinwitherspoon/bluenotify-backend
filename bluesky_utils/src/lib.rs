@@ -3,7 +3,7 @@ use lazy_static::lazy_static;
 use regex::Regex;
 use serde_json::Value;
 use std::{collections::HashSet, error::Error};
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 pub fn bluesky_browseable_url(handle: &str, rkey: &str) -> String {
     format!("https://bsky.app/profile/{}/post/{}", handle, rkey)
@@ -171,13 +171,14 @@ pub async fn get_following(
                             }
                         }
                         _ => {
-                            let msg: String = format!("Error getting profile: {} - {}", error_text, message_text);
+                            let msg: String = format!("Unknown Error getting profile: {} - {}", error_text, message_text);
                             error!("{}", msg);
                             return Err(GetFollowsError::StatusError(status));
                         }
                     }
                 }
             }
+            warn!("Failed Request Response JSON: {:?}", json);
         }
         error!("Error getting profile: {}", status);
         return Err(GetFollowsError::StatusError(status));

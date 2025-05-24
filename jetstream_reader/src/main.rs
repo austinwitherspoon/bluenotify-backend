@@ -220,7 +220,7 @@ async fn get_last_event_time(kv_store: Store) -> Option<String> {
 
 async fn rescan_user_follows(did: String, pg_pool: DBPool) {
     info!("Rescanning follows for {}", did);
-    let follows = match get_following(&did, None, Some(std::time::Duration::from_millis(50))).await
+    let follows = match get_following(&did, None, Some(std::time::Duration::from_millis(500))).await
     {
         Ok(follows) => follows,
         Err(error) => match error {
