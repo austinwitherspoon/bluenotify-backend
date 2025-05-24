@@ -288,7 +288,8 @@ async fn rescan_user_follows(did: String, pg_pool: DBPool) {
     let existing = match account_follows::table
         .filter(account_follows::account_did.eq(did.clone()))
         .load::<AccountFollow>(&mut conn)
-        .await {
+        .await
+    {
         Ok(existing) => existing,
         Err(e) => {
             error!("Error getting existing follows: {:?}", e);
@@ -588,7 +589,10 @@ async fn connect_and_listen(
             }
         };
         JETSTREAM_LAG.set(
-            (chrono::Utc::now() - event_time).num_nanoseconds().expect("i64 overflow!") as f64 / 1_000_000_000.0,
+            (chrono::Utc::now() - event_time)
+                .num_nanoseconds()
+                .expect("i64 overflow!") as f64
+                / 1_000_000_000.0,
         );
 
         if post_time < chrono::Utc::now() - OLDEST_POST_AGE {
@@ -730,6 +734,16 @@ async fn update_watched_users(
             return Err("Error getting watched users lock!".into());
         }
     };
+
+    // Users that are new to the app and need a fresh scan
+    let new_bluenotify_users: bool = bluenotify_users
+        .clone()
+        .into_iter()
+        .collect::<HashSet<String>>()
+        .difference(&watched_users.bluenotify_users)
+        .count()
+        > 0;
+
     watched_users.watched_users = actual_watched_users.into_iter().collect();
     watched_users.bluenotify_users = bluenotify_users.into_iter().collect();
 
@@ -742,14 +756,17 @@ async fn update_watched_users(
         watched_users.bluenotify_users.len()
     );
 
-    tokio::spawn(async move {
-        match fill_in_missing_follows(pg_pool.clone()).await {
-            Ok(_) => {}
-            Err(e) => {
-                error!("Error filling in missing follows: {:?}", e);
+    if new_bluenotify_users {
+        info!("New bluenotify users found, rescanning follows.");
+        tokio::spawn(async move {
+            match fill_in_missing_follows(pg_pool.clone()).await {
+                Ok(_) => {}
+                Err(e) => {
+                    error!("Error filling in missing follows: {:?}", e);
+                }
             }
-        }
-    });
+        });
+    }
 
     Ok(())
 }
@@ -896,7 +913,9 @@ async fn _main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             name: "watched_posts".to_string(),
             subjects: vec!["watched_posts.*".to_string()],
             max_messages: 100_000,
-            duplicate_window: OLDEST_POST_AGE.to_std().expect("Could not convert OldestPostAge to std"),
+            duplicate_window: OLDEST_POST_AGE
+                .to_std()
+                .expect("Could not convert OldestPostAge to std"),
             ..Default::default()
         })
         .await?;
@@ -909,7 +928,10 @@ async fn _main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         })
         .await;
 
-    let kv_store = nats_js.get_key_value("bluenotify_kv_store").await.expect("Failed to get kv store");
+    let kv_store = nats_js
+        .get_key_value("bluenotify_kv_store")
+        .await
+        .expect("Failed to get kv store");
 
     let shared_watched_users = Arc::new(RwLock::new(WatchedUsers {
         watched_users: HashSet::new(),
@@ -925,7 +947,9 @@ async fn _main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .with_state(AxumState {
             pool: pg_pool.clone(),
         });
-    let axum_listener = tokio::net::TcpListener::bind(axum_url).await.expect("Failed to bind to address");
+    let axum_listener = tokio::net::TcpListener::bind(axum_url)
+        .await
+        .expect("Failed to bind to address");
 
     let mut tasks: JoinSet<_> = JoinSet::new();
     let watched_copy = shared_watched_users.clone();
@@ -942,11 +966,15 @@ async fn _main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         pg_pool.clone(),
     ));
     tasks.spawn(async move {
-        axum::serve(axum_listener, axum_app).await.expect("Failed to start server");
+        axum::serve(axum_listener, axum_app)
+            .await
+            .expect("Failed to start server");
     });
 
     tasks.spawn(async move {
-        fill_in_missing_follows(pg_pool.clone()).await.expect("Failed to fill in missing follows");
+        fill_in_missing_follows(pg_pool.clone())
+            .await
+            .expect("Failed to fill in missing follows");
     });
 
     tasks.join_all().await;
@@ -993,6 +1021,8 @@ async fn metrics() -> String {
     let mut buffer = vec![];
     let encoder = TextEncoder::new();
     let metric_families = prometheus::gather();
-    encoder.encode(&metric_families, &mut buffer).expect("Failed to encode metrics");
+    encoder
+        .encode(&metric_families, &mut buffer)
+        .expect("Failed to encode metrics");
     String::from_utf8(buffer).expect("Failed to convert metrics to string")
 }
