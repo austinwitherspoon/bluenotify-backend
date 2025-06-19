@@ -58,14 +58,42 @@ struct AxumState {
 async fn get_or_create_user(
     mut conn: &mut Object<AsyncPgConnection>,
     fcm_token: String,
+    device_uuid: Option<String>,
 ) -> Result<User, StatusCode> {
-    info!("Creating user if not exists: {}", fcm_token);
+    info!(
+        "Creating user if not exists: {} (device_uuid: {:?})",
+        fcm_token, device_uuid
+    );
     let now = chrono::Utc::now().naive_utc();
     let new_user = NewUser {
         fcm_token: fcm_token.clone(),
         created_at: now.into(),
         updated_at: now.into(),
+        device_uuid: device_uuid.clone(),
     };
+
+    // Try lookup by device_uuid if provided
+    if let Some(ref uuid) = device_uuid {
+        let user_by_uuid = users::table
+            .filter(users::device_uuid.eq(uuid))
+            .first::<User>(&mut conn)
+            .await;
+        match user_by_uuid {
+            Ok(user) => return Ok(user),
+            Err(diesel::result::Error::NotFound) => {
+                // fallback to fcm_token below
+            }
+            Err(error) => {
+                error!(
+                    "Error checking for existing user by device_uuid {}: {:?}",
+                    uuid, error
+                );
+                return Err(StatusCode::INTERNAL_SERVER_ERROR);
+            }
+        }
+    }
+
+    // Fallback to lookup by fcm_token
     let existing_user = users::table
         .filter(users::fcm_token.eq(&fcm_token))
         .first::<User>(&mut conn)
@@ -169,13 +197,18 @@ async fn update_settings(
         .await
         .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
 
-    let user = get_or_create_user(&mut conn, fcm_token.clone()).await?;
+    // Use device_uuid if provided, otherwise None
+    let device_uuid = payload.device_uuid.clone();
+
+    let user = get_or_create_user(&mut conn, fcm_token.clone(), device_uuid.clone()).await?;
     let now: SerializableTimestamp = chrono::Utc::now().naive_utc().into();
 
     diesel::update(users::table.filter(users::id.eq(&user.id)))
         .set((
             users::updated_at.eq(now),
             users::deleted_at.eq::<Option<SerializableTimestamp>>(None),
+            users::device_uuid.eq(device_uuid),
+            users::fcm_token.eq(fcm_token.clone()),
         ))
         .execute(&mut conn)
         .await
@@ -307,7 +340,7 @@ async fn delete_settings(
         .await
         .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
 
-    let user = get_or_create_user(&mut conn, fcm_token.clone()).await?;
+    let user = get_or_create_user(&mut conn, fcm_token.clone(), None).await?;
 
     diesel::delete(
         notification_settings::table.filter(notification_settings::user_id.eq(&user.id)),

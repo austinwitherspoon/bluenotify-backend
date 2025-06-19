@@ -82,6 +82,7 @@ pub struct User {
 #[diesel(check_for_backend(diesel::pg::Pg))]
 pub struct NewUser {
     pub fcm_token: String,
+    pub device_uuid: Option<String>,
     pub created_at: SerializableTimestamp,
     pub updated_at: SerializableTimestamp,
 }

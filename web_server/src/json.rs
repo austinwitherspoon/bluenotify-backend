@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct UserSettings {
     pub fcm_token: String,
+    pub device_uuid: Option<String>, // <-- add this line
     pub accounts: Vec<Account>,
     pub notification_settings: Vec<NotificationSetting>,
 }
@@ -61,6 +62,7 @@ impl UserSettings {
 
         Ok(Self {
             fcm_token: fcm_token.to_string(),
+            device_uuid: user.device_uuid,
             accounts,
             notification_settings,
         })
