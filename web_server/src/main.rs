@@ -209,6 +209,14 @@ async fn update_settings(
             users::deleted_at.eq::<Option<SerializableTimestamp>>(None),
             users::device_uuid.eq(device_uuid),
             users::fcm_token.eq(fcm_token.clone()),
+            // If fcm_token changed, update last_token_refresh
+            users::last_token_refresh.eq(
+                if user.fcm_token != fcm_token {
+                    Some(now)
+                } else {
+                    user.last_token_refresh
+                }
+            ),
         ))
         .execute(&mut conn)
         .await
