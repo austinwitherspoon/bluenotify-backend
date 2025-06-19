@@ -18,6 +18,7 @@ use diesel_async::pooled_connection::AsyncDieselConnectionManager;
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use lazy_static::lazy_static;
 use prometheus::{self, register_int_gauge, Encoder, IntGauge, TextEncoder};
+use serde::Deserialize;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -210,13 +211,11 @@ async fn update_settings(
             users::device_uuid.eq(device_uuid),
             users::fcm_token.eq(fcm_token.clone()),
             // If fcm_token changed, update last_token_refresh
-            users::last_token_refresh.eq(
-                if user.fcm_token != fcm_token {
-                    Some(now)
-                } else {
-                    user.last_token_refresh
-                }
-            ),
+            users::last_token_refresh.eq(if user.fcm_token != fcm_token {
+                Some(now)
+            } else {
+                user.last_token_refresh
+            }),
         ))
         .execute(&mut conn)
         .await
@@ -356,6 +355,69 @@ async fn delete_settings(
     .execute(&mut conn)
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    if let Err(e) = update_watched_users(&mut conn, &kv_store).await {
+        error!("Error updating watched users: {:?}", e);
+    }
+
+    Ok("Success".to_string())
+}
+
+#[derive(Deserialize)]
+struct DeleteAccountRequest {
+    fcm_token: String,
+    device_uuid: Option<String>,
+}
+
+#[axum::debug_handler]
+async fn delete_account(
+    State(AxumState { pool, kv_store, .. }): State<AxumState>,
+    Json(payload): Json<DeleteAccountRequest>,
+) -> Result<String, StatusCode> {
+    let mut conn = pool
+        .get()
+        .await
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+
+    // Try lookup by device_uuid if provided, else by fcm_token
+    let user: User = if let Some(ref uuid) = payload.device_uuid {
+        let user = users::table
+            .filter(users::device_uuid.eq(uuid))
+            .first::<User>(&mut conn)
+            .await;
+        match user {
+            Ok(user) => user,
+            Err(diesel::result::Error::NotFound) => {
+                // fallback to fcm_token below
+                users::table
+                    .filter(users::fcm_token.eq(&payload.fcm_token))
+                    .first::<User>(&mut conn)
+                    .await
+                    .map_err(|_| StatusCode::NOT_FOUND)?
+            }
+            Err(error) => {
+                error!(
+                    "Error checking for existing user by device_uuid {}: {:?}",
+                    uuid, error
+                );
+                return Err(StatusCode::INTERNAL_SERVER_ERROR);
+            }
+        }
+    } else {
+        users::table
+            .filter(users::fcm_token.eq(&payload.fcm_token))
+            .first::<User>(&mut conn)
+            .await
+            .map_err(|_| StatusCode::NOT_FOUND)?
+    };
+
+    let now: SerializableTimestamp = chrono::Utc::now().naive_utc().into();
+    // Delete notification_settings, accounts, and user (CASCADE should handle all if set up)
+    diesel::update(users::table.filter(users::id.eq(user.id)))
+        .set((users::deleted_at.eq(Some(now)),))
+        .execute(&mut conn)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     if let Err(e) = update_watched_users(&mut conn, &kv_store).await {
         error!("Error updating watched users: {:?}", e);
@@ -576,6 +638,7 @@ async fn _main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             "/notifications/{fcm_token}/opened",
             post(notification_opened),
         )
+        .route("/account", delete(delete_account))
         .with_state(AxumState {
             pool: pg_pool.clone(),
             kv_store: kv_store.clone(),
