@@ -56,6 +56,9 @@ diesel::table! {
         created_at -> Timestamp,
         updated_at -> Timestamp,
         deleted_at -> Nullable<Timestamp>,
+        device_uuid -> Nullable<Text>,
+        last_token_refresh -> Nullable<Timestamp>,
+        last_interaction -> Nullable<Timestamp>,
     }
 }
 

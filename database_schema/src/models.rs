@@ -72,6 +72,9 @@ pub struct User {
     pub created_at: SerializableTimestamp,
     pub updated_at: SerializableTimestamp,
     pub deleted_at: Option<SerializableTimestamp>,
+    pub device_uuid: Option<String>,
+    pub last_token_refresh: Option<SerializableTimestamp>,
+    pub last_interaction: Option<SerializableTimestamp>,
 }
 
 #[derive(Insertable, Debug)]
