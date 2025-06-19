@@ -397,6 +397,36 @@ async fn update_watched_users(
 }
 
 #[axum::debug_handler]
+async fn notification_opened(
+    State(AxumState { pool, .. }): State<AxumState>,
+    Path(fcm_token): Path<String>,
+) -> Result<String, StatusCode> {
+    let mut conn = pool
+        .get()
+        .await
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+
+    let user = users::table
+        .filter(users::fcm_token.eq(&fcm_token))
+        .first::<User>(&mut conn)
+        .await
+        .map_err(|_| StatusCode::NOT_FOUND)?;
+
+    let now: SerializableTimestamp = chrono::Utc::now().naive_utc().into();
+
+    diesel::update(users::table.filter(users::id.eq(user.id)))
+        .set(users::last_interaction.eq(Some(now)))
+        .execute(&mut conn)
+        .await
+        .map_err(|e| {
+            error!("Error updating last_interaction: {:?}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    Ok("Success".to_string())
+}
+
+#[axum::debug_handler]
 async fn proxy_post_image(Path(url): Path<String>) -> Result<Response, StatusCode> {
     info!("Proxying image: {}", url);
 
@@ -542,6 +572,10 @@ async fn _main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .route("/settings/{fcm_token}", post(update_settings))
         .route("/settings/{fcm_token}", delete(delete_settings))
         .route("/image/{url}", get(proxy_post_image))
+        .route(
+            "/notifications/{fcm_token}/opened",
+            post(notification_opened),
+        )
         .with_state(AxumState {
             pool: pg_pool.clone(),
             kv_store: kv_store.clone(),
